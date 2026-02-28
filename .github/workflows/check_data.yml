@@ -50,5 +50,4 @@ jobs:
           GITHUB_GIST_TOKEN:  ${{ secrets.GIST_TOKEN }}
           GITHUB_GIST_ID:     ${{ secrets.GIST_ID }}
         run: |
-          cd src
           python main.py
