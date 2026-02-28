@@ -38,6 +38,8 @@ jobs:
       - name: Install Playwright Chromium
         run: |
           playwright install chromium
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
           playwright install-deps chromium
 
       # ── Run the main script ──────────────────────────────────────────────
@@ -50,5 +52,4 @@ jobs:
           GITHUB_GIST_TOKEN:  ${{ secrets.GIST_TOKEN }}
           GITHUB_GIST_ID:     ${{ secrets.GIST_ID }}
         run: |
-          cd src
           python main.py
