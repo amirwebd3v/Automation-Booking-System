@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# sim24 Auto Data Booker — GitHub Actions Workflow
+# Runs every 5 minutes. The Python script itself decides whether enough
+# time has elapsed (based on the configured interval stored in Gist).
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: sim24 Data Check & Auto-Book
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # Every 5 minutes (GitHub Actions minimum)
+  workflow_dispatch:          # Allow manual trigger from GitHub UI
+
+jobs:
+  check-and-book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10       # Kill if hangs (safety net)
+
+    steps:
+      # ── Checkout repository ──────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Set up Python ────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── Install Python dependencies ──────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── Install Playwright browsers ──────────────────────────────────────
+      - name: Install Playwright Chromium
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      # ── Run the main script ──────────────────────────────────────────────
+      - name: Run data check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          SIM24_USERNAME:     ${{ secrets.SIM24_USERNAME }}
+          SIM24_PASSWORD:     ${{ secrets.SIM24_PASSWORD }}
+          GITHUB_GIST_TOKEN:  ${{ secrets.GIST_TOKEN }}
+          GITHUB_GIST_ID:     ${{ secrets.GIST_ID }}
+        run: |
+          cd src
+          python main.py
