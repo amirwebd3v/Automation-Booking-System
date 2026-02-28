@@ -1,14 +1,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # sim24 Auto Data Booker — GitHub Actions Workflow
-# Runs every 5 minutes. The Python script itself decides whether enough
-# time has elapsed (based on the configured interval stored in Gist).
+# Runs every 30 minutes. Free, self-contained — no external service needed.
+# Trigger manually anytime via the "Run workflow" button in the Actions tab.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: sim24 Data Check & Auto-Book
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # Every 5 minutes (GitHub Actions minimum)
+    - cron: '*/30 * * * *'  # Every 30 minutes (free, within GitHub)
   workflow_dispatch:          # Allow manual trigger from GitHub UI
 
 jobs:
@@ -38,9 +38,7 @@ jobs:
       - name: Install Playwright Chromium
         run: |
           playwright install chromium
-          sudo apt-get update
-          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
-          playwright install-deps chromium
+          sudo apt-get install -y libasound2t64
 
       # ── Run the main script ──────────────────────────────────────────────
       - name: Run data check
