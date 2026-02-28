@@ -9,7 +9,7 @@ The threshold is configurable (default 1.5 GB).
 
 
 class DecisionEngine:
-    def __init__(self, threshold_gb: float = 1.5):
+    def __init__(self, threshold_gb: float = 0.5):
         self.threshold_gb = threshold_gb
 
     def should_book(self, remaining_gb: float) -> bool:

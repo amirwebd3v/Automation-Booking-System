@@ -61,7 +61,7 @@ async def main():
         print(f"[DATA] Used: {used_gb:.2f} GB / {total_gb:.2f} GB | Remaining: {remaining_gb:.2f} GB")
 
         # ── Step 3: Decision Engine ──────────────────────────────────────────
-        engine = DecisionEngine(threshold_gb=1.5)
+        engine = DecisionEngine(threshold_gb=0.5)
         should_book = engine.should_book(remaining_gb)
 
         status_msg = (
