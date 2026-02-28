@@ -4,6 +4,7 @@ Runs on GitHub Actions every 30 minutes (controlled by the cron schedule).
 """
 
 import sys
+import time
 import asyncio
 from config_manager import ConfigManager
 from telegram_notify import TelegramNotifier
@@ -21,6 +22,13 @@ async def main():
     )
 
     print("[START] Starting data check cycle.")
+
+    # ── Interval gate: only run full pipeline when enough time has elapsed ──
+    if not config.is_time_to_run():
+        elapsed = int((time.time() - config.last_run_ts) / 60)
+        print(f"[CONFIG] Skipping — interval not elapsed. "
+              f"Elapsed: {elapsed} min / {config.interval_minutes} min required.")
+        return
 
     browser = None
     try:
@@ -62,7 +70,7 @@ async def main():
             f"📊 *Data Usage Report*\n"
             f"Used: `{used_gb:.2f} GB` / `{total_gb:.2f} GB`\n"
             f"Remaining: `{remaining_gb:.2f} GB`\n"
-            f"Threshold: `1.5 GB`\n"
+            f"Threshold: `{engine.threshold_gb} GB`\n"
             f"Action: {'🟡 Booking triggered...' if should_book else '✅ No action needed'}"
         )
         await telegram.send(status_msg)
