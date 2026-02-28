@@ -38,9 +38,7 @@ jobs:
       - name: Install Playwright Chromium
         run: |
           playwright install chromium
-          sudo apt-get update
-          sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
-          playwright install-deps chromium
+          sudo apt-get install -y libasound2t64
 
       # ── Run the main script ──────────────────────────────────────────────
       - name: Run data check
