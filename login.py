@@ -16,13 +16,14 @@ Both Flow A and Flow B are handled via the same CaptchaHandler (Telegram photo �
 The TelegramNotifier is passed in from main.py so it's shared across all modules.
 """
 
+import os
 import asyncio
 from playwright.async_api import async_playwright, Browser, Page
 from typing import Tuple, Optional
 
 # CaptchaHandler is imported here — it needs the page and telegram notifier
 # We import lazily inside the method to avoid circular imports at module load
-LOGIN_URL   = "https://service.sim24.de/public/login"
+LOGIN_URL   = "https://service.sim24.de/"
 SUCCESS_URL = "https://service.sim24.de/mytariff"
 DATA_URL    = "https://service.sim24.de/mytariff/invoice/showGprsDataUsage"
 
@@ -47,15 +48,30 @@ class Sim24Login:
 
         playwright = await async_playwright().start()
 
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ]
-        )
+        # ── Browser selection ─────────────────────────────────────────────
+        # USE_EDGE=true in .env → uses your installed Microsoft Edge
+        # USE_EDGE not set    → uses Playwright's built-in Chromium (default)
+        # Edge is recommended locally; Chromium is used on GitHub Actions
+        # (Edge is not available on GitHub Actions runners)
+        use_edge = os.environ.get("USE_EDGE", "false").lower() == "true"
+
+        if use_edge:
+            print("[LOGIN] Using Microsoft Edge")
+            browser = await playwright.chromium.launch(
+                channel="msedge",
+                headless=True,
+            )
+        else:
+            print("[LOGIN] Using Playwright Chromium")
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ]
+            )
 
         context = await browser.new_context(
             user_agent=(
@@ -95,9 +111,17 @@ class Sim24Login:
                 # Small human-like delay
                 await asyncio.sleep(0.8)
 
-                # ── Submit via the JavaScript anchor ──────────────────────────
-                # The page uses: onclick="submitForm('loginAction');"
-                await page.click("a[onclick=\"submitForm('loginAction');\"]")
+                # ── Submit form ───────────────────────────────────────────────
+                # Try multiple selectors first; fall back to direct JS call
+                submit_clicked = await self._click_submit(page)
+                if not submit_clicked:
+                    print("[LOGIN] No submit button matched any selector — trying JS submitForm()")
+                    try:
+                        await page.evaluate("submitForm('loginAction')")
+                    except Exception:
+                        # Last resort: press Enter on the password field
+                        print("[LOGIN] JS submitForm failed — pressing Enter on password field")
+                        await page.press("#UserLoginType_password", "Enter")
 
                 # ── Wait briefly then check what happened ─────────────────────
                 await asyncio.sleep(2)
