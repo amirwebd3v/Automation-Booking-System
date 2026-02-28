@@ -1,7 +1,6 @@
 """
 sim24 Auto Data Booker — Main Entry Point
-Runs on GitHub Actions every 5 minutes.
-Checks elapsed time against configured interval before doing actual work.
+Runs on GitHub Actions every 30 minutes (controlled by the cron schedule).
 """
 
 import sys
@@ -21,12 +20,7 @@ async def main():
         chat_id=config.telegram_chat_id
     )
 
-    # ── Check if enough time has passed since last run ──────────────────────
-    if not config.is_time_to_run():
-        print(f"[SKIP] Not time yet. Interval: {config.interval_minutes}min. Exiting.")
-        return
-
-    print("[START] Time to run — starting data check cycle.")
+    print("[START] Starting data check cycle.")
 
     browser = None
     try:
