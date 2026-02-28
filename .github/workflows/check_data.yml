@@ -38,7 +38,15 @@ jobs:
       - name: Install Playwright Chromium
         run: |
           playwright install chromium
-          sudo apt-get install -y libasound2t64
+          sudo apt-get update
+          # Ubuntu 24.04 renamed libasound2 → libasound2t64.
+          # playwright install-deps hard-codes libasound2, so we create a
+          # dummy transitional package that satisfies the name requirement.
+          sudo apt-get install -y libasound2t64 equivs --no-install-recommends
+          printf 'Package: libasound2\nVersion: 1.2.99\nArchitecture: all\nDepends: libasound2t64\nMaintainer: CI <ci@ci.com>\nDescription: Transitional dummy for Ubuntu 24.04\n' \
+            | equivs-build -
+          sudo dpkg -i libasound2_1.2.99_all.deb
+          playwright install-deps chromium
 
       # ── Run the main script ──────────────────────────────────────────────
       - name: Run data check
