@@ -13,8 +13,9 @@ Commands:
 
 Deploy to Render.com:
   - New Web Service → connect this repo
+  - Root directory:  scheduler_bot
   - Build command:   pip install -r requirements_bot.txt
-  - Start command:   python scheduler_bot/bot.py
+  - Start command:   python bot.py
   - Add env vars:    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GITHUB_GIST_TOKEN, GITHUB_GIST_ID
 """
 
