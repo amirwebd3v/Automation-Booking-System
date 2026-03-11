@@ -9,6 +9,7 @@ Commands:
   /interval 30     → Set check interval to 30 minutes
   /interval 60     → Set check interval to 60 minutes
   /status          → Show current config (interval + last run time)
+    /book            → Trigger booking workflow immediately
   /help            → Show available commands
 
 Deploy to Render.com:
@@ -34,6 +35,10 @@ AUTHORIZED_CHAT = str(os.environ["TELEGRAM_CHAT_ID"])
 GITHUB_TOKEN    = os.environ["GITHUB_GIST_TOKEN"]
 GIST_ID         = os.environ["GITHUB_GIST_ID"]
 GIST_FILENAME   = "sim24_bot_config.json"
+GITHUB_REPO_OWNER = os.environ.get("GITHUB_REPO_OWNER", "amirwebd3v")
+GITHUB_REPO_NAME  = os.environ.get("GITHUB_REPO_NAME", "Automation-Booking-System")
+GITHUB_WORKFLOW_FILE = os.environ.get("GITHUB_WORKFLOW_FILE", "check_data.yml")
+GITHUB_WORKFLOW_REF = os.environ.get("GITHUB_WORKFLOW_REF", "main")
 
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
@@ -63,6 +68,22 @@ def save_gist(data: dict):
         }
     }
     requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=payload, timeout=10)
+
+
+def trigger_workflow_dispatch() -> None:
+    """Trigger GitHub Actions workflow_dispatch for immediate booking run."""
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    payload = {"ref": GITHUB_WORKFLOW_REF}
+    url = (
+        f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/"
+        f"actions/workflows/{GITHUB_WORKFLOW_FILE}/dispatches"
+    )
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=10)
+    resp.raise_for_status()
 
 # ── Telegram helpers ─────────────────────────────────────────────────────────
 
@@ -134,10 +155,26 @@ async def handle_message(message: dict):
             "🤖 *sim24 Auto Booker — Commands*\n\n"
             "`/interval <minutes>` — Change check interval\n"
             "`/status` — Show current config and last run\n"
+            "`/book` — Trigger booking workflow now\n"
             "`/help` — Show this message\n\n"
             "_Default interval: 30 minutes_\n"
             "_Minimum interval: 5 minutes_"
         )
+
+    elif text == "/book":
+        try:
+            trigger_workflow_dispatch()
+            await send_message(chat_id,
+                "🚀 *Manual workflow triggered.*\n"
+                "Booking pipeline started now via GitHub Actions.\n"
+                "You should receive the result shortly."
+            )
+        except Exception as e:
+            print(f"[BOT] Failed to trigger workflow: {e}")
+            await send_message(chat_id,
+                "❌ *Could not trigger workflow.*\n"
+                "Check token permissions or repository settings."
+            )
 
     else:
         # Ignore unknown messages (may be captcha replies handled by main bot)
