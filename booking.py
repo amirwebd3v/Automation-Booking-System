@@ -9,11 +9,10 @@ From the HTML analysis:
   Service code: V5I3
 
 Flow:
-  1. Set up a listener for the getChangeServiceInfo AJAX response.
-  2. Click the Buchen button (force if standard click is blocked by overlay).
-  3. Parse the captured response HTML to extract the Aktivieren button's
-     sendPostAndReplaceContent(url, formId) call.
-  4. Execute that call directly — no DOM search needed, closed shadow DOM safe.
+  1. Open an expect_response listener for getChangeServiceInfo.
+  2. Click the Buchen button inside that listener context.
+  3. Parse the captured AJAX response to extract the Aktivieren URL.
+  4. Execute sendPostAndReplaceContent(url, formId) directly.
   5. Verify success via page content keywords.
 """
 
@@ -32,10 +31,8 @@ BOOK_BUTTON_SELECTORS = [
     "a:has-text('Buchen')",
 ]
 
-BOOK_FORM_SELECTOR = "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
-
-# Activation URL used when we cannot extract it from the modal response.
-FALLBACK_ACTIVATION_URL = "/mytariff/invoice/changeService"
+BOOK_FORM_SELECTOR    = "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
+FALLBACK_ACTIVATE_URL = "/mytariff/invoice/changeService"
 
 
 class BookingModule:
@@ -59,7 +56,7 @@ class BookingModule:
         # ── Step 1: Find booking button ────────────────────────────────────
         button, selector_used = await self._find_booking_button()
         if button is None:
-            self._log("[BOOKING] ❌ Book button not found on page.")
+            self._log("[BOOKING] ❌ Book button not found.")
             await self.telegram.send(
                 "⚠️ *Booking button not found.*\n"
                 "The page structure may have changed.\n\n"
@@ -70,8 +67,8 @@ class BookingModule:
 
         self._log(f"[BOOKING] ✅ Booking button found via: `{selector_used}`")
 
-        # Remove disabled state if set.
-        is_disabled  = await button.get_attribute("disabled")
+        # Remove disabled state if present.
+        is_disabled   = await button.get_attribute("disabled")
         aria_disabled = await button.get_attribute("aria-disabled")
         if is_disabled is not None or str(aria_disabled).lower() == "true":
             self._log("[BOOKING] ⚠️ Button disabled — applying JS override...")
@@ -79,7 +76,7 @@ class BookingModule:
                 """
                 () => {
                   for (const el of document.querySelectorAll(
-                      "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-'], a[title='Buchen']"
+                    "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-'], a[title='Buchen']"
                   )) {
                     el.removeAttribute('disabled');
                     el.setAttribute('aria-disabled', 'false');
@@ -90,57 +87,62 @@ class BookingModule:
             )
             await asyncio.sleep(0.5)
 
-        # ── Step 2: Start listening for the getChangeServiceInfo response ──
-        # We must create the task BEFORE clicking so we don't miss the response.
-        info_response_task = asyncio.create_task(
-            self.page.wait_for_response(
-                lambda r: "getChangeServiceInfo" in r.url,
-                timeout=25_000,
-            )
-        )
-
-        # ── Step 3: Click the booking button ──────────────────────────────
-        self._log("[BOOKING] Clicking book button...")
-        clicked = False
+        # ── Steps 2–3: Click Buchen while capturing getChangeServiceInfo ───
+        # expect_response must wrap the click so the listener is active when
+        # the AJAX call fires.  Timeout is generous (30 s) to survive a slow
+        # standard-click timeout + force-click attempt.
+        clicked      = False
         click_method = None
+        modal_html   = None
 
-        try:
-            await button.click(timeout=10_000)
-            clicked = True
-            click_method = "standard click"
-        except Exception as e:
-            self._log(f"[BOOKING] Standard click blocked ({type(e).__name__}) — trying force click...")
+        async with self.page.expect_response(
+            lambda r: "getChangeServiceInfo" in r.url,
+            timeout=30_000,
+        ) as resp_info:
 
-        if not clicked:
             try:
-                await button.click(force=True, timeout=5_000)
+                await button.click(timeout=10_000)
                 clicked = True
-                click_method = "force click"
+                click_method = "standard click"
             except Exception as e:
-                self._log(f"[BOOKING] Force click failed ({type(e).__name__}) — trying JS click...")
+                self._log(
+                    f"[BOOKING] Standard click blocked ({type(e).__name__}) "
+                    "— trying force click..."
+                )
 
-        if not clicked:
-            clicked = await self.page.evaluate(
-                """
-                () => {
-                  const selectors = [
-                    "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-']",
-                    "a[id*='ButtonBuchen'][id*='showGprsDataUsage']",
-                    "a[title='Buchen']",
-                  ];
-                  for (const sel of selectors) {
-                    const el = document.querySelector(sel);
-                    if (el) { el.click(); return true; }
-                  }
-                  return false;
-                }
-                """
-            )
-            if clicked:
-                click_method = "JS click"
+            if not clicked:
+                try:
+                    await button.click(force=True, timeout=5_000)
+                    clicked = True
+                    click_method = "force click"
+                except Exception as e:
+                    self._log(
+                        f"[BOOKING] Force click failed ({type(e).__name__}) "
+                        "— trying JS click..."
+                    )
 
+            if not clicked:
+                clicked = await self.page.evaluate(
+                    """
+                    () => {
+                      const sels = [
+                        "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-']",
+                        "a[id*='ButtonBuchen'][id*='showGprsDataUsage']",
+                        "a[title='Buchen']",
+                      ];
+                      for (const s of sels) {
+                        const el = document.querySelector(s);
+                        if (el) { el.click(); return true; }
+                      }
+                      return false;
+                    }
+                    """
+                )
+                if clicked:
+                    click_method = "JS click"
+
+        # Fail fast if nothing was clicked.
         if not clicked:
-            info_response_task.cancel()
             self._log("[BOOKING] ❌ All click methods failed.")
             await self.telegram.send(
                 "❌ *Booking click failed.*\n\n"
@@ -150,11 +152,23 @@ class BookingModule:
             return False
 
         self._log(f"[BOOKING] ✅ Book button clicked via {click_method}.")
+
+        # Collect the AJAX response (should already be captured by now, or
+        # will arrive momentarily).
+        try:
+            info_response = await resp_info.value
+            modal_html    = await info_response.text()
+            self._log(
+                f"[BOOKING] ✅ getChangeServiceInfo response: "
+                f"HTTP {info_response.status}, {len(modal_html)} chars."
+            )
+        except Exception as e:
+            self._log(f"[BOOKING] ⚠️ Could not capture getChangeServiceInfo response: {e}")
+
         await asyncio.sleep(2)
 
-        # ── Step 4: Dismiss cookie consent (may appear after click) ───────
-        cookie_dismissed = await self._handle_cookie_consent()
-        if cookie_dismissed:
+        # ── Step 4: Dismiss cookie consent if it appeared ─────────────────
+        if await self._handle_cookie_consent():
             self._log("[BOOKING] ✅ Cookie consent dismissed.")
             await asyncio.sleep(1)
 
@@ -174,19 +188,22 @@ class BookingModule:
                 return False
             await asyncio.sleep(0.5)
 
-        # ── Step 6: Activate via captured AJAX response ───────────────────
-        activation_clicked = await self._activate_from_response(info_response_task)
+        # ── Step 6: Activate via parsed modal HTML ─────────────────────────
+        activation_clicked = False
 
-        # ── Step 7: Fallback — direct changeService call ──────────────────
+        if modal_html:
+            activation_clicked = await self._activate_from_html(modal_html)
+
+        # ── Step 7: Fallback — call changeService directly ─────────────────
         if not activation_clicked:
             self._log(
-                "[BOOKING] ⚠️ Response-based activation failed — "
+                "[BOOKING] ⚠️ HTML-based activation failed — "
                 "trying direct changeService call..."
             )
             activation_clicked = await self._activate_directly()
 
         if not activation_clicked:
-            self._log("[BOOKING] ⚠️ No confirm action succeeded — proceeding to verify anyway.")
+            self._log("[BOOKING] ⚠️ No confirm action succeeded — proceeding to verify.")
 
         # ── Step 8: Verify booking success ────────────────────────────────
         success = await self._verify_success()
@@ -197,22 +214,22 @@ class BookingModule:
     # ── Helpers ────────────────────────────────────────────────────────────
 
     async def _find_booking_button(self):
-        for selector in BOOK_BUTTON_SELECTORS:
+        for sel in BOOK_BUTTON_SELECTORS:
             try:
-                candidate = await self.page.query_selector(selector)
-                if candidate and await candidate.is_visible():
-                    return candidate, selector
+                el = await self.page.query_selector(sel)
+                if el and await el.is_visible():
+                    return el, sel
             except Exception:
                 continue
         return None, None
 
     async def _handle_cookie_consent(self) -> bool:
-        for selector in ["#consent_wall_optin", "button#consent_wall_optin",
-                         "button:has-text('Bestätigen')"]:
+        for sel in ["#consent_wall_optin", "button#consent_wall_optin",
+                    "button:has-text('Bestätigen')"]:
             try:
-                btn = await self.page.query_selector(selector)
+                btn = await self.page.query_selector(sel)
                 if btn and await btn.is_visible():
-                    print(f"[BOOKING] Cookie consent via: {selector}")
+                    print(f"[BOOKING] Cookie consent via: {sel}")
                     await btn.click()
                     await asyncio.sleep(1)
                     return True
@@ -220,61 +237,32 @@ class BookingModule:
                 continue
         return False
 
-    async def _activate_from_response(
-        self, response_task: asyncio.Task
-    ) -> bool:
+    async def _activate_from_html(self, html: str) -> bool:
         """
-        Await the getChangeServiceInfo AJAX response, parse its HTML to find
-        the Aktivieren button's sendPostAndReplaceContent(url, formId) call,
-        then execute it directly.
-
-        This approach is closed-shadow-DOM-safe because it never needs to find
-        the Aktivieren button in the rendered DOM at all.
+        Parse the getChangeServiceInfo AJAX response to find the Aktivieren
+        button's sendPostAndReplaceContent(url, formId) call, then execute it.
+        Bypasses shadow DOM entirely — no DOM search needed.
         """
-        try:
-            self._log("[BOOKING] Waiting for getChangeServiceInfo response...")
-            response = await asyncio.wait_for(response_task, timeout=20)
-            status   = response.status
-            html     = await response.text()
-            self._log(
-                f"[BOOKING] ✅ getChangeServiceInfo response received "
-                f"(HTTP {status}, {len(html)} chars)."
-            )
-        except asyncio.TimeoutError:
-            self._log("[BOOKING] ❌ getChangeServiceInfo response timed out.")
-            response_task.cancel()
-            return False
-        except Exception as e:
-            self._log(f"[BOOKING] ❌ getChangeServiceInfo capture error: {e}")
-            response_task.cancel()
-            return False
-
-        # Parse the modal HTML for the Aktivieren button onclick.
-        # Pattern: sendPostAndReplaceContent('/mytariff/invoice/changeService', 'BaseForm-...', true)
         m = re.search(
             r"sendPostAndReplaceContent\s*\(\s*['\"]([^'\"]+)['\"],\s*['\"]([^'\"]+)['\"]",
             html,
         )
         if m:
-            activation_url = m.group(1)
-            form_id        = m.group(2)
-            self._log(
-                f"[BOOKING] ✅ Extracted activation: url=`{activation_url}` "
-                f"formId=`{form_id}`"
-            )
+            url     = m.group(1)
+            form_id = m.group(2)
+            self._log(f"[BOOKING] ✅ Parsed activation: url=`{url}` formId=`{form_id}`")
         else:
-            # No sendPostAndReplaceContent found — fall back to known URL + page form.
+            # No explicit URL found — use fallback URL with page's form.
             self._log(
-                "[BOOKING] ⚠️ Could not parse activation URL from response — "
-                f"using fallback `{FALLBACK_ACTIVATION_URL}`."
+                f"[BOOKING] ⚠️ Could not parse activation URL from response — "
+                f"using fallback `{FALLBACK_ACTIVATE_URL}`."
             )
-            activation_url = FALLBACK_ACTIVATION_URL
-            form_id        = None  # will be resolved in JS below
+            url     = FALLBACK_ACTIVATE_URL
+            form_id = None
 
         result = await self.page.evaluate(
             """
             ([url, formId]) => {
-              // Resolve formId from page if not supplied.
               if (!formId) {
                 const f = document.querySelector(
                   "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
@@ -286,7 +274,7 @@ class BookingModule:
                 sendPostAndReplaceContent(url, formId, true);
                 return 'sendPost';
               }
-              // Final fallback: submit form directly to the activation URL.
+              // Fallback: set form action and submit.
               const form = document.getElementById(formId)
                 || document.querySelector(
                      "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
@@ -297,7 +285,7 @@ class BookingModule:
               return 'form-submit';
             }
             """,
-            [activation_url, form_id],
+            [url, form_id],
         )
 
         if result in ("sendPost", "form-submit"):
@@ -310,9 +298,8 @@ class BookingModule:
 
     async def _activate_directly(self) -> bool:
         """
-        Last-resort: call sendPostAndReplaceContent for the changeService URL
-        using the form that is already on the page (has CSRF token + service code).
-        Skips the getChangeServiceInfo intermediate step.
+        Last resort: call sendPostAndReplaceContent('/mytariff/invoice/changeService', ...)
+        directly using the form already on the page (contains CSRF token + service code).
         """
         result = await self.page.evaluate(
             """
@@ -330,13 +317,13 @@ class BookingModule:
               return 'form-submit-direct';
             }
             """,
-            FALLBACK_ACTIVATION_URL,
+            FALLBACK_ACTIVATE_URL,
         )
         if result in ("sendPost-direct", "form-submit-direct"):
             self._log(f"[BOOKING] ✅ Direct activation triggered ({result}).")
             await asyncio.sleep(4)
             return True
-        self._log(f"[BOOKING] ❌ Direct activation JS returned: `{result}`")
+        self._log(f"[BOOKING] ❌ Direct activation returned: `{result}`")
         return False
 
     async def _verify_success(self) -> bool:
