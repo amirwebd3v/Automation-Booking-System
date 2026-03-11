@@ -139,6 +139,9 @@ class BookingModule:
 
         await asyncio.sleep(2)  # Wait for any modal/captcha to appear
 
+        # Some runs show cookie consent before activation dialog.
+        await self._handle_cookie_consent()
+
         # ── Step 3: Handle captcha if present ─────────────────────────────
         captcha_present = await self.captcha.is_captcha_present()
         if captcha_present:
@@ -163,11 +166,14 @@ class BookingModule:
 
             await asyncio.sleep(0.5)
 
-        # ── Step 4: Look for a confirmation button (submit the booking) ────
-        # After solving captcha (or if no captcha), find the confirm/submit
-        confirmed = await self._confirm_booking()
-        if not confirmed:
-            print("[BOOKING] No explicit confirm action found. Will continue with verification.")
+        # Primary confirmation path on SIM24: activation modal button.
+        activation_clicked = await self._handle_activation_modal()
+
+        # Fallback if activation modal is not present in this run.
+        if not activation_clicked:
+            confirmed = await self._confirm_booking()
+            if not confirmed:
+                print("[BOOKING] No explicit confirm action found. Will continue with verification.")
 
         # ── Step 5: Verify booking success ────────────────────────────────
         success = await self._verify_success()
@@ -185,6 +191,49 @@ class BookingModule:
             except Exception:
                 continue
         return None, None
+
+    async def _handle_cookie_consent(self) -> bool:
+        """Accept cookie consent popup when it appears."""
+        cookie_selectors = [
+            "#consent_wall_optin",
+            "button#consent_wall_optin",
+            "button:has-text('Bestätigen')",
+        ]
+
+        for selector in cookie_selectors:
+            try:
+                btn = await self.page.query_selector(selector)
+                if btn and await btn.is_visible():
+                    print(f"[BOOKING] Cookie consent detected via: {selector}")
+                    await btn.click()
+                    await asyncio.sleep(1)
+                    return True
+            except Exception:
+                continue
+
+        return False
+
+    async def _handle_activation_modal(self) -> bool:
+        """Click the activation button shown in booking confirmation modal."""
+        activation_selectors = [
+            "[id^='ButtonAktivieren-ChangeServiceType-']",
+            "a[id^='ButtonAktivieren-']",
+            "a[title='Aktivieren']",
+            "a:has-text('Aktivieren')",
+        ]
+
+        for selector in activation_selectors:
+            try:
+                btn = await self.page.query_selector(selector)
+                if btn and await btn.is_visible():
+                    print(f"[BOOKING] Activation modal detected via: {selector}")
+                    await btn.click()
+                    await asyncio.sleep(2)
+                    return True
+            except Exception:
+                continue
+
+        return False
 
     async def _confirm_booking(self) -> bool:
         """
