@@ -167,7 +167,7 @@ class BookingModule:
             await asyncio.sleep(0.5)
 
         # Primary confirmation path on SIM24: activation modal button.
-        activation_clicked = await self._handle_activation_modal()
+        activation_clicked = await self._handle_activation_modal(timeout_seconds=12)
 
         # Fallback if activation modal is not present in this run.
         if not activation_clicked:
@@ -213,26 +213,72 @@ class BookingModule:
 
         return False
 
-    async def _handle_activation_modal(self) -> bool:
+    async def _handle_activation_modal(self, timeout_seconds: int = 10) -> bool:
         """Click the activation button shown in booking confirmation modal."""
         activation_selectors = [
             "[id^='ButtonAktivieren-ChangeServiceType-']",
             "a[id^='ButtonAktivieren-']",
+            "a[onclick*='sendPostAndReplaceContent'][onclick*='/mytariff/invoice/changeService']",
+            ".c-overlay-button-bar a.submitOnEnter[title='Aktivieren']",
             "a[title='Aktivieren']",
             "a:has-text('Aktivieren')",
         ]
 
-        for selector in activation_selectors:
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        while asyncio.get_event_loop().time() < deadline:
+            for selector in activation_selectors:
+                try:
+                    btn = await self.page.query_selector(selector)
+                    if btn and await btn.is_visible():
+                        print(f"[BOOKING] Activation modal detected via: {selector}")
+                        try:
+                            await btn.click(timeout=10_000)
+                            await asyncio.sleep(2)
+                            return True
+                        except Exception as e:
+                            print(f"[BOOKING] Activation standard click failed: {e}")
+                            try:
+                                await btn.click(force=True, timeout=10_000)
+                                await asyncio.sleep(2)
+                                return True
+                            except Exception as e2:
+                                print(f"[BOOKING] Activation forced click failed: {e2}")
+                except Exception:
+                    continue
+
+            # JS fallback for dynamic modal button wiring.
             try:
-                btn = await self.page.query_selector(selector)
-                if btn and await btn.is_visible():
-                    print(f"[BOOKING] Activation modal detected via: {selector}")
-                    await btn.click()
+                clicked = await self.page.evaluate(
+                    """
+                    () => {
+                      const selectors = [
+                        "[id^='ButtonAktivieren-ChangeServiceType-']",
+                        "a[id^='ButtonAktivieren-']",
+                        "a[onclick*='sendPostAndReplaceContent'][onclick*='/mytariff/invoice/changeService']",
+                        ".c-overlay-button-bar a.submitOnEnter[title='Aktivieren']",
+                        "a[title='Aktivieren']"
+                      ];
+                      for (const sel of selectors) {
+                        const el = document.querySelector(sel);
+                        if (el) {
+                          el.click();
+                          return true;
+                        }
+                      }
+                      return false;
+                    }
+                    """
+                )
+                if clicked:
+                    print("[BOOKING] Activation clicked via JS fallback.")
                     await asyncio.sleep(2)
                     return True
             except Exception:
-                continue
+                pass
 
+            await asyncio.sleep(0.5)
+
+        print("[BOOKING] Activation modal not found within timeout.")
         return False
 
     async def _confirm_booking(self) -> bool:
@@ -319,7 +365,7 @@ class BookingModule:
                 "ungültig",
                 "captcha",
                 "fehler",
-                "error",
+                "ein fehler ist aufgetreten",
             ]
             for keyword in failure_keywords:
                 if keyword in page_content_lower:
