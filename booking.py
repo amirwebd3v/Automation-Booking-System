@@ -95,51 +95,69 @@ class BookingModule:
         click_method = None
         modal_html   = None
 
-        async with self.page.expect_response(
-            lambda r: "getChangeServiceInfo" in r.url,
-            timeout=30_000,
-        ) as resp_info:
+        # expect_response timeout must cover all fallback click attempts:
+        # standard click (10s) + force click (5s) + response arrival (~15s) = 60s.
+        try:
+            async with self.page.expect_response(
+                lambda r: "getChangeServiceInfo" in r.url,
+                timeout=60_000,
+            ) as resp_info:
 
-            try:
-                await button.click(timeout=10_000)
-                clicked = True
-                click_method = "standard click"
-            except Exception as e:
-                self._log(
-                    f"[BOOKING] Standard click blocked ({type(e).__name__}) "
-                    "— trying force click..."
-                )
-
-            if not clicked:
                 try:
-                    await button.click(force=True, timeout=5_000)
+                    await button.click(timeout=10_000)
                     clicked = True
-                    click_method = "force click"
+                    click_method = "standard click"
                 except Exception as e:
                     self._log(
-                        f"[BOOKING] Force click failed ({type(e).__name__}) "
-                        "— trying JS click..."
+                        f"[BOOKING] Standard click blocked ({type(e).__name__}) "
+                        "— trying force click..."
                     )
 
-            if not clicked:
-                clicked = await self.page.evaluate(
-                    """
-                    () => {
-                      const sels = [
-                        "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-']",
-                        "a[id*='ButtonBuchen'][id*='showGprsDataUsage']",
-                        "a[title='Buchen']",
-                      ];
-                      for (const s of sels) {
-                        const el = document.querySelector(s);
-                        if (el) { el.click(); return true; }
-                      }
-                      return false;
-                    }
-                    """
+                if not clicked:
+                    try:
+                        await button.click(force=True, timeout=5_000)
+                        clicked = True
+                        click_method = "force click"
+                    except Exception as e:
+                        self._log(
+                            f"[BOOKING] Force click failed ({type(e).__name__}) "
+                            "— trying JS click..."
+                        )
+
+                if not clicked:
+                    clicked = await self.page.evaluate(
+                        """
+                        () => {
+                          const sels = [
+                            "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-']",
+                            "a[id*='ButtonBuchen'][id*='showGprsDataUsage']",
+                            "a[title='Buchen']",
+                          ];
+                          for (const s of sels) {
+                            const el = document.querySelector(s);
+                            if (el) { el.click(); return true; }
+                          }
+                          return false;
+                        }
+                        """
+                    )
+                    if clicked:
+                        click_method = "JS click"
+
+            # Collect the AJAX response captured by the context manager.
+            try:
+                info_response = await resp_info.value
+                modal_html    = await info_response.text()
+                self._log(
+                    f"[BOOKING] ✅ getChangeServiceInfo response: "
+                    f"HTTP {info_response.status}, {len(modal_html)} chars."
                 )
-                if clicked:
-                    click_method = "JS click"
+            except Exception as e:
+                self._log(f"[BOOKING] ⚠️ Could not capture getChangeServiceInfo response: {e}")
+
+        except Exception as e:
+            # expect_response timed out — proceed with fallback activation.
+            self._log(f"[BOOKING] ⚠️ expect_response timed out ({type(e).__name__}) — proceeding without modal HTML.")
 
         # Fail fast if nothing was clicked.
         if not clicked:
@@ -152,18 +170,6 @@ class BookingModule:
             return False
 
         self._log(f"[BOOKING] ✅ Book button clicked via {click_method}.")
-
-        # Collect the AJAX response (should already be captured by now, or
-        # will arrive momentarily).
-        try:
-            info_response = await resp_info.value
-            modal_html    = await info_response.text()
-            self._log(
-                f"[BOOKING] ✅ getChangeServiceInfo response: "
-                f"HTTP {info_response.status}, {len(modal_html)} chars."
-            )
-        except Exception as e:
-            self._log(f"[BOOKING] ⚠️ Could not capture getChangeServiceInfo response: {e}")
 
         await asyncio.sleep(2)
 
