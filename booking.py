@@ -20,11 +20,27 @@ import asyncio
 from playwright.async_api import Page
 from telegram_notify import TelegramNotifier
 from captcha_handler import CaptchaHandler
-from typing import Optional
 
 
 BOOK_BUTTON_ID = "ButtonBuchen-ChangeServiceType-showGprsDataUsage-2V5I3"
 BOOK_FORM_ID   = "BaseForm-ChangeServiceType-showGprsDataUsage-2V5I3"
+
+# Keep legacy fixed IDs as first-choice fallback, but prefer prefix selectors
+# because the trailing tariff/service token can change.
+BOOK_BUTTON_SELECTORS = [
+    f"#{BOOK_BUTTON_ID}",
+    "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-']",
+    "a[id*='ButtonBuchen'][id*='showGprsDataUsage']",
+    "a[title*='Buchen']",
+    "button:has-text('Buchen')",
+    "a:has-text('Buchen')",
+]
+
+BOOK_FORM_SELECTORS = [
+    f"#{BOOK_FORM_ID}",
+    "form[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']",
+    "form[id*='ChangeServiceType'][id*='showGprsDataUsage']",
+]
 
 
 class BookingModule:
@@ -39,8 +55,8 @@ class BookingModule:
         """
         print("[BOOKING] Starting 2GB packet booking...")
 
-        # ── Step 1: Check button state ─────────────────────────────────────
-        button = await self.page.query_selector(f"#{BOOK_BUTTON_ID}")
+        # ── Step 1: Find booking button dynamically ────────────────────────
+        button, selector_used = await self._find_booking_button()
 
         if button is None:
             print("[BOOKING] Book button not found on page.")
@@ -48,21 +64,79 @@ class BookingModule:
                 "⚠️ *Booking button not found.*\n"
                 "The page structure may have changed."
             )
+            await self._send_debug_screenshot("booking-button-not-found")
             return False
+
+        print(f"[BOOKING] Booking button found via selector: {selector_used}")
 
         # Check if button is disabled
         is_disabled = await button.get_attribute("disabled")
-        if is_disabled is not None:
-            print("[BOOKING] Button is disabled. Attempting JS override...")
-            # Try to remove the disabled attribute via JavaScript
+        aria_disabled = await button.get_attribute("aria-disabled")
+        if is_disabled is not None or str(aria_disabled).lower() == "true":
+            print("[BOOKING] Button looks disabled. Attempting JS override...")
             await self.page.evaluate(
-                f"document.getElementById('{BOOK_BUTTON_ID}').removeAttribute('disabled')"
+                """
+                () => {
+                  const candidates = Array.from(document.querySelectorAll("[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-'], a[title*='Buchen']"));
+                  for (const el of candidates) {
+                    el.removeAttribute('disabled');
+                    el.setAttribute('aria-disabled', 'false');
+                    if (el.classList) {
+                      el.classList.remove('disabled');
+                    }
+                  }
+                }
+                """
             )
             await asyncio.sleep(0.5)
 
         # ── Step 2: Click the booking button ──────────────────────────────
         print("[BOOKING] Clicking book button...")
-        await button.click()
+        clicked = False
+        try:
+            await button.click(timeout=10_000)
+            clicked = True
+        except Exception as e:
+            print(f"[BOOKING] Standard click failed: {e}")
+
+        if not clicked:
+            try:
+                await button.click(force=True, timeout=10_000)
+                clicked = True
+            except Exception as e:
+                print(f"[BOOKING] Forced click failed: {e}")
+
+        if not clicked:
+            # Last-resort JS click using robust selector list.
+            clicked = await self.page.evaluate(
+                """
+                () => {
+                  const selectors = [
+                    "#ButtonBuchen-ChangeServiceType-showGprsDataUsage-2V5I3",
+                    "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-']",
+                    "a[id*='ButtonBuchen'][id*='showGprsDataUsage']",
+                    "a[title*='Buchen']"
+                  ];
+                  for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (el) {
+                      el.click();
+                      return true;
+                    }
+                  }
+                  return false;
+                }
+                """
+            )
+
+        if not clicked:
+            await self.telegram.send(
+                "❌ *Booking click failed.*\n"
+                "The booking button was found but could not be clicked."
+            )
+            await self._send_debug_screenshot("booking-click-failed")
+            return False
+
         await asyncio.sleep(2)  # Wait for any modal/captcha to appear
 
         # ── Step 3: Handle captcha if present ─────────────────────────────
@@ -93,12 +167,24 @@ class BookingModule:
         # After solving captcha (or if no captcha), find the confirm/submit
         confirmed = await self._confirm_booking()
         if not confirmed:
-            # Maybe the form auto-submitted after captcha — check for success
-            pass
+            print("[BOOKING] No explicit confirm action found. Will continue with verification.")
 
         # ── Step 5: Verify booking success ────────────────────────────────
         success = await self._verify_success()
+        if not success:
+            await self._send_debug_screenshot("booking-verify-failed")
         return success
+
+    async def _find_booking_button(self):
+        """Return first visible booking button and selector used."""
+        for selector in BOOK_BUTTON_SELECTORS:
+            try:
+                candidate = await self.page.query_selector(selector)
+                if candidate and await candidate.is_visible():
+                    return candidate, selector
+            except Exception:
+                continue
+        return None, None
 
     async def _confirm_booking(self) -> bool:
         """
@@ -107,11 +193,13 @@ class BookingModule:
         """
         # Common selectors for confirmation submit buttons
         confirm_selectors = [
-            "button[type='submit']",
-            "input[type='submit']",
+            "a[onclick*='submitForm'][onclick*='ChangeServiceType']",
+            "a.c-button[onclick*='submitForm']",
             "a.c-button[title='Buchen']",
             "a.c-button[title='Bestätigen']",
             "a.c-button[title='Bestellen']",
+            "button[type='submit']",
+            "input[type='submit']",
             ".btn-submit",
         ]
 
@@ -127,15 +215,27 @@ class BookingModule:
                 continue
 
         # Try submitting the form directly via JavaScript
-        try:
-            form_exists = await self.page.query_selector(f"#{BOOK_FORM_ID}")
-            if form_exists:
-                print("[BOOKING] Submitting form via JavaScript...")
-                await self.page.evaluate(f"document.getElementById('{BOOK_FORM_ID}').submit()")
-                await asyncio.sleep(2)
-                return True
-        except Exception as e:
-            print(f"[BOOKING] JS form submit failed: {e}")
+        for selector in BOOK_FORM_SELECTORS:
+            try:
+                form_exists = await self.page.query_selector(selector)
+                if form_exists:
+                    print(f"[BOOKING] Submitting form via JavaScript: {selector}")
+                    submitted = await self.page.evaluate(
+                        """
+                        (sel) => {
+                          const f = document.querySelector(sel);
+                          if (!f) return false;
+                          f.submit();
+                          return true;
+                        }
+                        """,
+                        selector,
+                    )
+                    if submitted:
+                        await asyncio.sleep(2)
+                        return True
+            except Exception as e:
+                print(f"[BOOKING] JS form submit failed for {selector}: {e}")
 
         return False
 
@@ -146,25 +246,39 @@ class BookingModule:
         await asyncio.sleep(2)
 
         try:
-            # Check for success message elements (common German success text)
-            success_indicators = [
-                "text=erfolgreich",      # "successfully"
-                "text=Datenpaket",       # "data package"
-                "text=gebucht",          # "booked"
-                "text=Buchung",          # "booking"
-                ".noticeBox-success",
-                ".alert-success",
-                ".success",
-            ]
-
             page_content = await self.page.content()
             page_content_lower = page_content.lower()
 
-            success_keywords = ["erfolgreich", "gebucht", "buchung bestätigt", "successfully"]
+            success_keywords = [
+                "erfolgreich",
+                "gebucht",
+                "buchung bestaetigt",
+                "buchung bestätigt",
+                "bestellung erfolgreich",
+                "successfully",
+            ]
             for keyword in success_keywords:
                 if keyword in page_content_lower:
                     print(f"[BOOKING] Success keyword found: '{keyword}'")
                     return True
+
+            failure_keywords = [
+                "fehlgeschlagen",
+                "nicht moeglich",
+                "nicht möglich",
+                "ungueltig",
+                "ungültig",
+                "captcha",
+                "fehler",
+                "error",
+            ]
+            for keyword in failure_keywords:
+                if keyword in page_content_lower:
+                    print(f"[BOOKING] Failure keyword found: '{keyword}'")
+                    await self.telegram.send(
+                        f"❌ *Booking seems to have failed.*\nDetected keyword: `{keyword}`"
+                    )
+                    return False
 
             # Also check URL change (some sites redirect to confirmation page)
             current_url = self.page.url
@@ -187,9 +301,21 @@ class BookingModule:
         except Exception:
             pass
 
-        # Ambiguous — treat as potentially successful but notify
+        # Ambiguous result: mark as failed so next cycle can retry instead of
+        # incorrectly assuming success.
         await self.telegram.send(
-            "⚠️ *Booking submitted but could not auto-verify.*\n"
-            "Please check the screenshot above and your account."
+            "⚠️ *Booking submitted but could not be verified.*\n"
+            "Please check screenshot and account. Bot will retry next cycle if still below threshold."
         )
-        return True  # Return True to avoid double-booking on next cycle
+        return False
+
+    async def _send_debug_screenshot(self, reason: str) -> None:
+        """Best-effort screenshot for troubleshooting booking failures."""
+        try:
+            shot = await self.page.screenshot(full_page=True)
+            await self.telegram.send_photo(
+                image_bytes=shot,
+                caption=f"🧩 *Booking debug screenshot*\nReason: `{reason}`\nURL: `{self.page.url}`",
+            )
+        except Exception as e:
+            print(f"[BOOKING] Failed to send debug screenshot: {e}")
