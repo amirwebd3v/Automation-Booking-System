@@ -226,6 +226,12 @@ class BookingModule:
 
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         while asyncio.get_event_loop().time() < deadline:
+            # Best path for this portal: call the exact JS action wired in onclick.
+            triggered_post = await self._trigger_activation_post_action()
+            if triggered_post:
+                print("[BOOKING] Activation submitted via sendPostAndReplaceContent().")
+                return True
+
             for selector in activation_selectors:
                 try:
                     btn = await self.page.query_selector(selector)
@@ -280,6 +286,68 @@ class BookingModule:
 
         print("[BOOKING] Activation modal not found within timeout.")
         return False
+
+        async def _trigger_activation_post_action(self) -> bool:
+                """
+                Execute the exact portal activation action from the button's onclick:
+                    sendPostAndReplaceContent('/mytariff/invoice/changeService', formId, true)
+                """
+                try:
+                        result = await self.page.evaluate(
+                                r"""
+                                () => {
+                                    const candidates = [
+                                        "[id^='ButtonAktivieren-ChangeServiceType-']",
+                                        "a[id^='ButtonAktivieren-']",
+                                        "a[onclick*='sendPostAndReplaceContent'][onclick*='/mytariff/invoice/changeService']",
+                                        ".c-overlay-button-bar a.submitOnEnter[title='Aktivieren']",
+                                        "a[title='Aktivieren']"
+                                    ];
+
+                                    let btn = null;
+                                    for (const sel of candidates) {
+                                        const el = document.querySelector(sel);
+                                        if (el) {
+                                            btn = el;
+                                            break;
+                                        }
+                                    }
+                                    if (!btn) return { triggered: false, reason: "no-button" };
+
+                                    const onclick = btn.getAttribute("onclick") || "";
+                                    const fn = window.sendPostAndReplaceContent;
+                                    const match = onclick.match(/sendPostAndReplaceContent\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*,\s*(true|false)\s*\)/i);
+
+                                    if (typeof fn === "function" && match) {
+                                        const url = match[1];
+                                        const formId = match[2];
+                                        const closeOverlay = match[3].toLowerCase() === "true";
+                                        fn(url, formId, closeOverlay);
+                                        return { triggered: true, reason: "fn-call" };
+                                    }
+
+                                    btn.click();
+                                    return { triggered: true, reason: "fallback-click" };
+                                }
+                                """
+                        )
+
+                        if not result or not result.get("triggered"):
+                                return False
+
+                        try:
+                                await self.page.wait_for_response(
+                                        lambda r: "/mytariff/invoice/changeService" in r.url and r.request.method.upper() in {"POST", "GET"},
+                                        timeout=8_000,
+                                )
+                        except Exception:
+                                # The site may update via XHR or cached flow; short wait as fallback.
+                                await asyncio.sleep(2)
+
+                        return True
+                except Exception as e:
+                        print(f"[BOOKING] Activation post-action failed: {e}")
+                        return False
 
     async def _confirm_booking(self) -> bool:
         """
