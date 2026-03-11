@@ -157,7 +157,7 @@ async def handle_message(message: dict):
             "`/status` — Show current config and last run\n"
             "`/book` — Trigger booking workflow now\n"
             "`/help` — Show this message\n\n"
-            "_Default interval: 30 minutes_\n"
+            "_Default interval: 10 minutes_\n"
             "_Minimum interval: 5 minutes_"
         )
 
