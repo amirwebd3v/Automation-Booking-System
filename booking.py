@@ -214,7 +214,14 @@ class BookingModule:
         return False
 
     async def _handle_activation_modal(self, timeout_seconds: int = 10) -> bool:
-        """Click the activation button shown in booking confirmation modal."""
+        """
+        Trigger the SIM24 booking activation modal.
+
+        The Aktivieren button lives inside a <dialog is="c-overlay"> web component
+        whose shadow/event wiring intercepts Playwright click events reliably.
+        Instead of clicking, we parse the button's onclick attribute and call
+        sendPostAndReplaceContent() directly — the same JS the browser would run.
+        """
         activation_selectors = [
             "[id^='ButtonAktivieren-ChangeServiceType-']",
             "a[id^='ButtonAktivieren-']",
@@ -226,128 +233,53 @@ class BookingModule:
 
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         while asyncio.get_event_loop().time() < deadline:
-            # Best path for this portal: call the exact JS action wired in onclick.
-            triggered_post = await self._trigger_activation_post_action()
-            if triggered_post:
-                print("[BOOKING] Activation submitted via sendPostAndReplaceContent().")
-                return True
-
             for selector in activation_selectors:
                 try:
                     btn = await self.page.query_selector(selector)
-                    if btn and await btn.is_visible():
-                        print(f"[BOOKING] Activation modal detected via: {selector}")
-                        try:
-                            await btn.click(timeout=10_000)
-                            await asyncio.sleep(2)
-                            return True
-                        except Exception as e:
-                            print(f"[BOOKING] Activation standard click failed: {e}")
-                            try:
-                                await btn.click(force=True, timeout=10_000)
-                                await asyncio.sleep(2)
-                                return True
-                            except Exception as e2:
-                                print(f"[BOOKING] Activation forced click failed: {e2}")
-                except Exception:
-                    continue
+                    if btn is None or not await btn.is_visible():
+                        continue
 
-            # JS fallback for dynamic modal button wiring.
-            try:
-                clicked = await self.page.evaluate(
-                    """
-                    () => {
-                      const selectors = [
-                        "[id^='ButtonAktivieren-ChangeServiceType-']",
-                        "a[id^='ButtonAktivieren-']",
-                        "a[onclick*='sendPostAndReplaceContent'][onclick*='/mytariff/invoice/changeService']",
-                        ".c-overlay-button-bar a.submitOnEnter[title='Aktivieren']",
-                        "a[title='Aktivieren']"
-                      ];
-                      for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (el) {
-                          el.click();
-                          return true;
-                        }
-                      }
-                      return false;
-                    }
-                    """
-                )
-                if clicked:
-                    print("[BOOKING] Activation clicked via JS fallback.")
-                    await asyncio.sleep(2)
-                    return True
-            except Exception:
-                pass
+                    print(f"[BOOKING] Activation modal found via: {selector}")
+
+                    # Primary: invoke sendPostAndReplaceContent() directly.
+                    # This bypasses overlay click interception entirely.
+                    js = (
+                        "(sel) => {"
+                        "  const el = document.querySelector(sel);"
+                        "  if (!el) return false;"
+                        "  const onclick = el.getAttribute('onclick') || '';"
+                        "  const m = onclick.match("
+                        "    /sendPostAndReplaceContent\\(\"([^\"]+)\",\\s*\"([^\"]+)\"/"
+                        "  );"
+                        "  if (m && typeof sendPostAndReplaceContent === 'function') {"
+                        "    sendPostAndReplaceContent(m[1], m[2], true);"
+                        "    return true;"
+                        "  }"
+                        "  const urlM = onclick.match(/\"(\\/mytariff\\/invoice\\/[^\"]+)\"/);"
+                        "  const frmM = onclick.match(/,\\s*\"(BaseForm-[^\"]+)\"/);"
+                        "  if (urlM && frmM && typeof sendPostAndReplaceContent === 'function') {"
+                        "    sendPostAndReplaceContent(urlM[1], frmM[1], true);"
+                        "    return true;"
+                        "  }"
+                        "  el.click();"
+                        "  return true;"
+                        "}"
+                    )
+                    activated = await self.page.evaluate(js, selector)
+
+                    if activated:
+                        print("[BOOKING] Activation submitted via sendPostAndReplaceContent.")
+                        await asyncio.sleep(3)
+                        return True
+
+                except Exception as e:
+                    print(f"[BOOKING] Activation attempt failed for {selector}: {e}")
+                    continue
 
             await asyncio.sleep(0.5)
 
         print("[BOOKING] Activation modal not found within timeout.")
         return False
-
-        async def _trigger_activation_post_action(self) -> bool:
-                """
-                Execute the exact portal activation action from the button's onclick:
-                    sendPostAndReplaceContent('/mytariff/invoice/changeService', formId, true)
-                """
-                try:
-                        result = await self.page.evaluate(
-                                r"""
-                                () => {
-                                    const candidates = [
-                                        "[id^='ButtonAktivieren-ChangeServiceType-']",
-                                        "a[id^='ButtonAktivieren-']",
-                                        "a[onclick*='sendPostAndReplaceContent'][onclick*='/mytariff/invoice/changeService']",
-                                        ".c-overlay-button-bar a.submitOnEnter[title='Aktivieren']",
-                                        "a[title='Aktivieren']"
-                                    ];
-
-                                    let btn = null;
-                                    for (const sel of candidates) {
-                                        const el = document.querySelector(sel);
-                                        if (el) {
-                                            btn = el;
-                                            break;
-                                        }
-                                    }
-                                    if (!btn) return { triggered: false, reason: "no-button" };
-
-                                    const onclick = btn.getAttribute("onclick") || "";
-                                    const fn = window.sendPostAndReplaceContent;
-                                    const match = onclick.match(/sendPostAndReplaceContent\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*,\s*(true|false)\s*\)/i);
-
-                                    if (typeof fn === "function" && match) {
-                                        const url = match[1];
-                                        const formId = match[2];
-                                        const closeOverlay = match[3].toLowerCase() === "true";
-                                        fn(url, formId, closeOverlay);
-                                        return { triggered: true, reason: "fn-call" };
-                                    }
-
-                                    btn.click();
-                                    return { triggered: true, reason: "fallback-click" };
-                                }
-                                """
-                        )
-
-                        if not result or not result.get("triggered"):
-                                return False
-
-                        try:
-                                await self.page.wait_for_response(
-                                        lambda r: "/mytariff/invoice/changeService" in r.url and r.request.method.upper() in {"POST", "GET"},
-                                        timeout=8_000,
-                                )
-                        except Exception:
-                                # The site may update via XHR or cached flow; short wait as fallback.
-                                await asyncio.sleep(2)
-
-                        return True
-                except Exception as e:
-                        print(f"[BOOKING] Activation post-action failed: {e}")
-                        return False
 
     async def _confirm_booking(self) -> bool:
         """
@@ -404,9 +336,14 @@ class BookingModule:
 
     async def _verify_success(self) -> bool:
         """
-        Checks for success indicators on the page after booking attempt.
+        Checks for success indicators after the booking activation.
+        Waits for any AJAX response to settle before inspecting page content.
         """
-        await asyncio.sleep(2)
+        # Wait for the network to settle after sendPostAndReplaceContent AJAX call.
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=10_000)
+        except Exception:
+            await asyncio.sleep(3)
 
         try:
             page_content = await self.page.content()
@@ -425,14 +362,14 @@ class BookingModule:
                     print(f"[BOOKING] Success keyword found: '{keyword}'")
                     return True
 
+            # Use specific phrases only — single words like 'fehler' appear in
+            # hidden/template elements and produce false negatives.
             failure_keywords = [
                 "fehlgeschlagen",
                 "nicht moeglich",
                 "nicht möglich",
                 "ungueltig",
                 "ungültig",
-                "captcha",
-                "fehler",
                 "ein fehler ist aufgetreten",
             ]
             for keyword in failure_keywords:
@@ -443,7 +380,7 @@ class BookingModule:
                     )
                     return False
 
-            # Also check URL change (some sites redirect to confirmation page)
+            # Check for URL redirect to confirmation page.
             current_url = self.page.url
             if "success" in current_url.lower() or "bestaetigung" in current_url.lower():
                 return True
@@ -451,24 +388,10 @@ class BookingModule:
         except Exception as e:
             print(f"[BOOKING] Verification check failed: {e}")
 
-        # If we can't confirm, take a screenshot and send for manual verification
-        try:
-            screenshot = await self.page.screenshot(full_page=False)
-            await self.telegram.send_photo(
-                image_bytes=screenshot,
-                caption=(
-                    "📸 *Booking result page screenshot*\n"
-                    "Please verify if the booking was successful."
-                )
-            )
-        except Exception:
-            pass
-
-        # Ambiguous result: mark as failed so next cycle can retry instead of
-        # incorrectly assuming success.
+        # Could not determine result — caller will send a debug screenshot.
         await self.telegram.send(
-            "⚠️ *Booking submitted but could not be verified.*\n"
-            "Please check screenshot and account. Bot will retry next cycle if still below threshold."
+            "⚠️ *Booking submitted but could not be auto-verified.*\n"
+            "Sending a screenshot for manual check. Bot will retry if still below threshold."
         )
         return False
 

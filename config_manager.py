@@ -33,7 +33,7 @@ class ConfigManager:
 
     @property
     def interval_minutes(self) -> int:
-        return int(self._state.get("interval_minutes", 30))
+        return int(self._state.get("interval_minutes", 10))
 
     @property
     def last_run_ts(self) -> float:
@@ -55,7 +55,7 @@ class ConfigManager:
 
     def set_interval(self, minutes: int):
         """Called by scheduler bot to change check interval."""
-        self._state["interval_minutes"] = max(5, minutes)  # Minimum 5 min
+        self._state["interval_minutes"] = max(5, minutes)  # Minimum 5 min (default 10)
         self._save_state()
 
     # ── Gist persistence ──────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ class ConfigManager:
         except Exception as e:
             print(f"[CONFIG] Could not load Gist state: {e}. Using defaults.")
             return {
-                "interval_minutes": 30,
+                "interval_minutes": 10,
                 "last_run_ts": 0
             }
 
