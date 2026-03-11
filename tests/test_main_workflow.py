@@ -1,4 +1,12 @@
+import sys
+from pathlib import Path
+
 import pytest
+
+# Ensure tests can import root modules in CI/pytest importlib mode.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import main as workflow_main
 
