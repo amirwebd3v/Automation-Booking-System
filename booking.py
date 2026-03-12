@@ -345,6 +345,10 @@ class BookingModule:
             content_lower = (await self.page.content()).lower()
             self._log(f"[BOOKING] Verifying at URL: `{current_url}`")
 
+            if await self._has_processing_success_dialog(content_lower):
+                self._log("[BOOKING] ✅ Success modal detected: order is being processed.")
+                return True
+
             for kw in ["erfolgreich", "gebucht", "buchung bestaetigt",
                        "buchung bestätigt", "bestellung erfolgreich", "successfully"]:
                 if kw in content_lower:
@@ -375,6 +379,40 @@ class BookingModule:
             f"*Trace:*\n{self._trace_text()}"
         )
         return False
+
+    async def _has_processing_success_dialog(self, content_lower: str) -> bool:
+        # Fast path: visible text already in page HTML content.
+        if (
+            "dein auftrag ist in bearbeitung" in content_lower
+            and "information" in content_lower
+        ):
+            return True
+
+        # Robust path: inspect currently open overlay dialog in DOM.
+        try:
+            return await self.page.evaluate(
+                """
+                () => {
+                  const dialog = document.querySelector("dialog#c-overlay[open]");
+                  if (!dialog) return false;
+
+                  const headline = (
+                    dialog.querySelector(".c-overlay-headline")?.textContent || ""
+                  ).trim().toLowerCase();
+                  const content = (
+                    dialog.querySelector(".c-overlay-content")?.textContent || ""
+                  ).trim().toLowerCase();
+
+                  return (
+                    headline.includes("information")
+                    && content.includes("dein auftrag ist in bearbeitung")
+                  );
+                }
+                """
+            )
+        except Exception as e:
+            self._log(f"[BOOKING] Dialog-check skipped ({type(e).__name__}).")
+            return False
 
     async def _send_debug_screenshot(self, reason: str) -> None:
         try:
