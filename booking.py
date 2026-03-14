@@ -182,16 +182,67 @@ class BookingModule:
         if await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha detected.")
             await self.telegram.send("🔐 *Captcha appeared during booking.*\nSending image now...")
-            solution = await self.captcha.solve()
-            if solution is None:
-                return False
-            if not await self.captcha.enter_solution(solution):
-                self._log("[BOOKING] ❌ Could not enter captcha solution.")
-                await self.telegram.send(
-                    "❌ *Could not enter captcha solution.*\n\n"
-                    f"*Trace:*\n{self._trace_text()}"
-                )
-                return False
+
+            # Retry loop: up to 3 attempts in case the user misreads the captcha
+            for captcha_attempt in range(1, 4):
+                solution = await self.captcha.solve()
+                if solution is None:
+                    return False
+
+                if not await self.captcha.enter_solution(solution):
+                    self._log("[BOOKING] ❌ Could not enter captcha solution.")
+                    await self.telegram.send(
+                        "❌ *Could not enter captcha solution.*\n\n"
+                        f"*Trace:*\n{self._trace_text()}"
+                    )
+                    return False
+
+                self._log(f"[BOOKING] ✅ Captcha solution entered (attempt {captcha_attempt}) — clicking Aktivieren.")
+
+                # Click the Aktivieren button directly inside the dialog so that
+                # sim24's own onclick handler fires, which correctly serialises
+                # ALL overlay form fields (including the captcha input).
+                if await self._click_aktivieren_in_dialog():
+                    # Wait briefly then check whether the overlay shows a
+                    # wrong-captcha error.  If it does, reload & retry.
+                    await asyncio.sleep(2)
+                    wrong_captcha = await self.page.evaluate(
+                        """
+                        () => {
+                          const dialog = document.querySelector('dialog#c-overlay[open]');
+                          if (!dialog) return false;
+                          const err = dialog.querySelector('.c-form-error-block');
+                          if (!err) return false;
+                          const txt = (err.textContent || '').toLowerCase();
+                          return !err.classList.contains('hide') && txt.includes('code');
+                        }
+                        """
+                    )
+                    if wrong_captcha and captcha_attempt < 3:
+                        self._log(f"[BOOKING] ⚠️ Wrong captcha (attempt {captcha_attempt}) — reloading and asking again.")
+                        await self.telegram.send(
+                            f"⚠️ *Wrong captcha (attempt {captcha_attempt}/3).* Reloading image — please try again."
+                        )
+                        # Reload the captcha image via the site's own reload link
+                        await self.page.evaluate(
+                            """() => {
+                              const a = document.querySelector('.captcha_reload');
+                              if (a) a.click();
+                            }"""
+                        )
+                        await asyncio.sleep(1)
+                        continue  # next attempt
+
+                    # Either captcha was accepted or we've exhausted retries
+                    success = await self._verify_success()
+                    if not success:
+                        await self._send_debug_screenshot("booking-verify-failed")
+                    return success
+
+                # Button not found — fall through to JS activation with captcha in DOM
+                self._log("[BOOKING] ⚠️ Aktivieren button not found in dialog — falling through to JS activation.")
+                break
+
             await asyncio.sleep(0.5)
 
         # ── Step 6: Activate via parsed modal HTML ─────────────────────────
@@ -413,6 +464,31 @@ class BookingModule:
         except Exception as e:
             self._log(f"[BOOKING] Dialog-check skipped ({type(e).__name__}).")
             return False
+
+    async def _click_aktivieren_in_dialog(self) -> bool:
+        """
+        Click the 'Aktivieren' confirmation button inside the open captcha
+        overlay dialog.  Doing this lets sim24's own onclick handler run, which
+        correctly serialises every field inside the overlay (including the
+        captcha input) before POSTing to changeService.
+        """
+        selectors = [
+            "[id^='ButtonAktivieren-ChangeServiceType-getChangeServiceInfo-']",
+            "dialog[open] a[title='Aktivieren']",
+            "#c-overlay a[title='Aktivieren']",
+            "a.c-button[title='Aktivieren']:not([title='Zurück'])",
+        ]
+        for sel in selectors:
+            try:
+                btn = await self.page.query_selector(sel)
+                if btn and await btn.is_visible():
+                    await btn.click(timeout=5_000)
+                    self._log(f"[BOOKING] ✅ Aktivieren clicked via: `{sel}`")
+                    return True
+            except Exception:
+                continue
+        self._log("[BOOKING] ⚠️ Aktivieren button not found in any selector.")
+        return False
 
     async def _send_debug_screenshot(self, reason: str) -> None:
         try:
