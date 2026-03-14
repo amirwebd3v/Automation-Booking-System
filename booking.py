@@ -217,6 +217,9 @@ class BookingModule:
         # This covers the case where the server returns a captcha challenge
         # after the form is submitted (e.g. direct changeService call), which
         # is different from the pre-activation captcha caught in Step 5.
+        # Wait for any loading spinner before checking DOM state.
+        if not captcha_handled:
+            await self._wait_for_loading()
         if not captcha_handled and await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha appeared in server response after activation.")
             await self.telegram.send(
@@ -315,7 +318,7 @@ class BookingModule:
 
         if result in ("sendPost", "form-submit"):
             self._log(f"[BOOKING] ✅ Activation triggered ({result}).")
-            await asyncio.sleep(4)
+            await self._wait_for_loading()
             return True
 
         self._log(f"[BOOKING] ❌ Activation JS returned: `{result}`")
@@ -346,52 +349,132 @@ class BookingModule:
         )
         if result in ("sendPost-direct", "form-submit-direct"):
             self._log(f"[BOOKING] ✅ Direct activation triggered ({result}).")
-            await asyncio.sleep(4)
+            await self._wait_for_loading()
             return True
         self._log(f"[BOOKING] ❌ Direct activation returned: `{result}`")
         return False
 
-    async def _verify_success(self) -> bool:
+    async def _wait_for_loading(self, timeout_seconds: int = 30) -> None:
+        """
+        Poll until the 'wird geladen' spinner overlay disappears from the DOM,
+        then wait for network idle. Gives up after timeout_seconds and proceeds.
+        """
+        IS_LOADING_JS = """
+        () => {
+          // 1. Exact 'wird geladen' text visible anywhere on the page
+          const walker = document.createTreeWalker(
+            document.body, NodeFilter.SHOW_TEXT
+          );
+          let node;
+          while ((node = walker.nextNode())) {
+            if (node.textContent.trim().toLowerCase() === 'wird geladen') {
+              const el = node.parentElement;
+              if (el) {
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                if (r.width > 0 && r.height > 0
+                    && s.display !== 'none'
+                    && s.visibility !== 'hidden'
+                    && s.opacity !== '0') {
+                  return true;
+                }
+              }
+            }
+          }
+          // 2. Visible spinner/loading overlay elements
+          //    Exclude the booking/captcha dialog (dialog#c-overlay)
+          const sels = [
+            '[class*="spinner"]:not(dialog)',
+            '[class*="loading-overlay"]',
+            '[class*="page-loading"]',
+          ];
+          for (const sel of sels) {
+            for (const el of document.querySelectorAll(sel)) {
+              const s = window.getComputedStyle(el);
+              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
+                continue;
+              const r = el.getBoundingClientRect();
+              if (r.width > 0 && r.height > 0) return true;
+            }
+          }
+          return false;
+        }
+        """
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        poll_no  = 0
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                still_loading = await self.page.evaluate(IS_LOADING_JS)
+            except Exception:
+                break  # page navigated or crashed — let verify sort it out
+            if not still_loading:
+                if poll_no > 0:
+                    self._log(f"[BOOKING] ✅ Loading finished after ~{poll_no * 0.5:.1f}s.")
+                break
+            if poll_no == 0:
+                self._log("[BOOKING] ⏳ Waiting for loading spinner to finish...")
+            poll_no += 1
+            await asyncio.sleep(0.5)
+        else:
+            self._log(f"[BOOKING] ⚠️ Loading still present after {timeout_seconds}s — proceeding anyway.")
+        # Also drain any in-flight network requests
         try:
-            await self.page.wait_for_load_state("networkidle", timeout=10_000)
-            self._log("[BOOKING] Network idle after activation.")
+            await self.page.wait_for_load_state("networkidle", timeout=5_000)
         except Exception:
-            self._log("[BOOKING] Network-idle timeout — sleeping 4s.")
-            await asyncio.sleep(4)
+            pass
 
-        try:
-            current_url   = self.page.url
-            content_lower = (await self.page.content()).lower()
-            self._log(f"[BOOKING] Verifying at URL: `{current_url}`")
+    async def _verify_success(self) -> bool:
+        # Wait for any loading spinner to clear before inspecting page content.
+        await self._wait_for_loading()
 
-            if await self._has_processing_success_dialog(content_lower):
-                self._log("[BOOKING] ✅ Success modal detected: order is being processed.")
-                return True
+        # Poll for up to 15 s so the success/failure dialog has time to render
+        # (it often arrives a moment after the spinner disappears).
+        POLL_INTERVAL = 1.0   # seconds between checks
+        POLL_TIMEOUT  = 15.0  # total seconds before giving up
+        deadline = asyncio.get_event_loop().time() + POLL_TIMEOUT
 
-            for kw in ["erfolgreich", "gebucht", "buchung bestaetigt",
-                       "buchung bestätigt", "bestellung erfolgreich", "successfully"]:
-                if kw in content_lower:
-                    self._log(f"[BOOKING] ✅ Success keyword: `{kw}`")
+        while True:
+            try:
+                current_url   = self.page.url
+                content_lower = (await self.page.content()).lower()
+                self._log(f"[BOOKING] Verifying at URL: `{current_url}`")
+
+                # ── Success signals ────────────────────────────────────────
+                if await self._has_processing_success_dialog(content_lower):
+                    self._log("[BOOKING] ✅ Success modal detected: order is being processed.")
                     return True
 
-            if "success" in current_url.lower() or "bestaetigung" in current_url.lower():
-                self._log("[BOOKING] ✅ Success URL detected.")
-                return True
+                for kw in ["erfolgreich", "gebucht", "buchung bestaetigt",
+                           "buchung bestätigt", "bestellung erfolgreich", "successfully"]:
+                    if kw in content_lower:
+                        self._log(f"[BOOKING] ✅ Success keyword: `{kw}`")
+                        return True
 
-            for kw in ["fehlgeschlagen", "nicht moeglich", "nicht möglich",
-                       "ungueltig", "ungültig", "ein fehler ist aufgetreten"]:
-                if kw in content_lower:
-                    self._log(f"[BOOKING] ❌ Failure keyword: `{kw}`")
-                    await self.telegram.send(
-                        f"❌ *Booking failed.*\nDetected: `{kw}`\n\n"
-                        f"*Trace:*\n{self._trace_text()}"
-                    )
-                    return False
+                if "success" in current_url.lower() or "bestaetigung" in current_url.lower():
+                    self._log("[BOOKING] ✅ Success URL detected.")
+                    return True
 
-        except Exception as e:
-            self._log(f"[BOOKING] ❌ Verification error: {type(e).__name__}: {e}")
+                # ── Definitive failure signals — stop polling immediately ──
+                for kw in ["fehlgeschlagen", "nicht moeglich", "nicht möglich",
+                           "ungueltig", "ungültig", "ein fehler ist aufgetreten"]:
+                    if kw in content_lower:
+                        self._log(f"[BOOKING] ❌ Failure keyword: `{kw}`")
+                        await self.telegram.send(
+                            f"❌ *Booking failed.*\nDetected: `{kw}`\n\n"
+                            f"*Trace:*\n{self._trace_text()}"
+                        )
+                        return False
 
-        self._log("[BOOKING] ❌ Outcome unclear from page content.")
+            except Exception as e:
+                self._log(f"[BOOKING] ❌ Verification error: {type(e).__name__}: {e}")
+
+            if asyncio.get_event_loop().time() >= deadline:
+                break
+
+            self._log(f"[BOOKING] ⏳ Outcome not yet clear — polling again...")
+            await asyncio.sleep(POLL_INTERVAL)
+
+        self._log("[BOOKING] ❌ Outcome unclear after polling.")
         await self.telegram.send(
             "⚠️ *Booking submitted but outcome is unclear.*\n"
             "Screenshot follows. Bot will retry if still below threshold.\n\n"
@@ -400,32 +483,75 @@ class BookingModule:
         return False
 
     async def _has_processing_success_dialog(self, content_lower: str) -> bool:
-        # Fast path: visible text already in page HTML content.
-        if (
-            "dein auftrag ist in bearbeitung" in content_lower
-            and "information" in content_lower
-        ):
+        # Fast path: the success phrase is unique — no other page element contains it.
+        if "dein auftrag ist in bearbeitung" in content_lower:
             return True
 
-        # Robust path: inspect currently open overlay dialog in DOM.
+        # Robust path: search ANY visible dialog/modal/overlay in the DOM
+        # for the success message, independent of element id or class name.
         try:
             return await self.page.evaluate(
                 """
                 () => {
-                  const dialog = document.querySelector("dialog#c-overlay[open]");
-                  if (!dialog) return false;
+                  const SUCCESS_TEXT = 'dein auftrag ist in bearbeitung';
+                  const HEADLINE_TEXT = 'information';
 
-                  const headline = (
-                    dialog.querySelector(".c-overlay-headline")?.textContent || ""
-                  ).trim().toLowerCase();
-                  const content = (
-                    dialog.querySelector(".c-overlay-content")?.textContent || ""
-                  ).trim().toLowerCase();
+                  // Helper: is an element actually visible to the user?
+                  function isVisible(el) {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    if (r.width === 0 && r.height === 0) return false;
+                    const s = window.getComputedStyle(el);
+                    return s.display !== 'none'
+                        && s.visibility !== 'hidden'
+                        && s.opacity !== '0';
+                  }
 
-                  return (
-                    headline.includes("information")
-                    && content.includes("dein auftrag ist in bearbeitung")
-                  );
+                  // 1. Check the known captcha/booking overlay dialog.
+                  const knownDialog = document.querySelector('dialog#c-overlay[open]');
+                  if (knownDialog && isVisible(knownDialog)) {
+                    const text = knownDialog.textContent.toLowerCase();
+                    if (text.includes(SUCCESS_TEXT)) return true;
+                  }
+
+                  // 2. Check ALL open <dialog> elements.
+                  for (const dlg of document.querySelectorAll('dialog[open]')) {
+                    if (!isVisible(dlg)) continue;
+                    const text = dlg.textContent.toLowerCase();
+                    if (text.includes(SUCCESS_TEXT)) return true;
+                  }
+
+                  // 3. Check common modal/overlay containers (non-dialog elements).
+                  const modalSelectors = [
+                    '[role="dialog"]',
+                    '[role="alertdialog"]',
+                    '.modal',
+                    '.overlay',
+                    '[class*="c-overlay"]',
+                    '[class*="modal"]',
+                  ];
+                  for (const sel of modalSelectors) {
+                    for (const el of document.querySelectorAll(sel)) {
+                      if (!isVisible(el)) continue;
+                      const text = el.textContent.toLowerCase();
+                      if (text.includes(SUCCESS_TEXT)) return true;
+                    }
+                  }
+
+                  // 4. Last resort: any visible element with both the headline
+                  //    and success text, accompanied by a 'Schließen' button.
+                  const allEls = document.querySelectorAll('div, section, aside, article');
+                  for (const el of allEls) {
+                    if (!isVisible(el)) continue;
+                    const text = el.textContent.toLowerCase();
+                    if (text.includes(HEADLINE_TEXT)
+                        && text.includes(SUCCESS_TEXT)
+                        && text.includes('schließen')) {
+                      return true;
+                    }
+                  }
+
+                  return false;
                 }
                 """
             )
