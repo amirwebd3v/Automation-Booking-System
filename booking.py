@@ -213,7 +213,24 @@ class BookingModule:
             if not activation_clicked:
                 self._log("[BOOKING] ⚠️ No confirm action succeeded — proceeding to verify.")
 
-        # ── Step 8: Verify booking success ────────────────────────────────
+        # ── Step 8: Check for captcha that appeared in the server's response ─
+        # This covers the case where the server returns a captcha challenge
+        # after the form is submitted (e.g. direct changeService call), which
+        # is different from the pre-activation captcha caught in Step 5.
+        if not captcha_handled and await self.captcha.is_captcha_present():
+            self._log("[BOOKING] 🔐 Captcha appeared in server response after activation.")
+            await self.telegram.send(
+                "🔐 *Captcha required by server.*\n"
+                "Sending image to Telegram — please reply with the code shown."
+            )
+            captcha_ok = await self.captcha.solve_with_retry(max_attempts=3)
+            if not captcha_ok:
+                self._log("[BOOKING] ❌ Post-activation captcha failed or timed out.")
+                await self._send_debug_screenshot("booking-captcha-post-failed")
+                return False
+            self._log("[BOOKING] ✅ Post-activation captcha solved and Aktivieren clicked.")
+
+        # ── Step 9: Verify booking success ────────────────────────────────
         success = await self._verify_success()
         if not success:
             await self._send_debug_screenshot("booking-verify-failed")
