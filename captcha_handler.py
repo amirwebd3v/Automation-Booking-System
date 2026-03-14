@@ -190,12 +190,74 @@ class CaptchaHandler:
                 if el and await el.is_visible():
                     await el.click()
                     print(f"[CAPTCHA] Clicked Aktivieren via: {sel}")
-                    await asyncio.sleep(3)  # Wait for AJAX response to settle
+                    await self._wait_for_loading()  # Instead of fixed sleep
                     return True
             except Exception:
                 continue
         print("[CAPTCHA] Could not find Aktivieren button in dialog.")
         return False
+
+    async def _wait_for_loading(self, timeout_seconds: int = 30) -> None:
+        """Poll until the 'wird geladen' spinner is gone (matches BookingModule logic)."""
+        IS_LOADING_JS = """
+        () => {
+          const walker = document.createTreeWalker(
+            document.body, NodeFilter.SHOW_TEXT
+          );
+          let node;
+          while ((node = walker.nextNode())) {
+            if (node.textContent.trim().toLowerCase() === 'wird geladen') {
+              const el = node.parentElement;
+              if (el) {
+                const r = el.getBoundingClientRect();
+                const s = window.getComputedStyle(el);
+                if (r.width > 0 && r.height > 0
+                    && s.display !== 'none'
+                    && s.visibility !== 'hidden'
+                    && s.opacity !== '0') {
+                  return true;
+                }
+              }
+            }
+          }
+          const sels = [
+            '[class*="spinner"]:not(dialog)',
+            '[class*="loading-overlay"]',
+            '[class*="page-loading"]',
+          ];
+          for (const sel of sels) {
+            for (const el of document.querySelectorAll(sel)) {
+              const s = window.getComputedStyle(el);
+              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
+                continue;
+              const r = el.getBoundingClientRect();
+              if (r.width > 0 && r.height > 0) return true;
+            }
+          }
+          return false;
+        }
+        """
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        poll_no  = 0
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                still_loading = await self.page.evaluate(IS_LOADING_JS)
+            except Exception:
+                break
+            if not still_loading:
+                if poll_no > 0:
+                    print(f"[CAPTCHA] ✅ Loading finished after ~{poll_no * 0.5:.1f}s.")
+                break
+            if poll_no == 0:
+                print("[CAPTCHA] ⏳ Waiting for loading spinner to finish...")
+            poll_no += 1
+            await asyncio.sleep(0.5)
+        else:
+            print(f"[CAPTCHA] ⚠️ Loading still present after {timeout_seconds}s — proceeding anyway.")
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=5_000)
+        except Exception:
+            pass
 
     async def solve_with_retry(self, max_attempts: int = 3) -> bool:
         """
