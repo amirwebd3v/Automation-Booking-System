@@ -3,17 +3,20 @@ Captcha Handler
 ───────────────
 When the booking form presents a captcha:
   1. Take a focused screenshot of the captcha element
-  2. Send it to Telegram with an urgent prompt
-  3. Wait up to 3 minutes for the user to reply with the solution
+  2. [PRIMARY]  Try Gemini Vision API to auto-read the code
+  3. [FALLBACK] If AI unavailable/wrong, send to Telegram and wait for a
+                human reply (up to 3 minutes)
   4. Return the solution text (or None on timeout)
 
 Retry flow (solve_with_retry):
-  - Solves captcha interactively via Telegram
+  - On each attempt, tries Gemini first, then Telegram as fall-back
   - Clicks the Aktivieren button in the dialog
   - Detects "nicht korrekt" error and retries with a freshly reloaded image
   - Returns True when captcha accepted, False after max attempts or timeout
 """
 
+import re
+import os
 import asyncio
 from playwright.async_api import Page
 from telegram_notify import TelegramNotifier
@@ -123,7 +126,17 @@ class CaptchaHandler:
             except Exception:
                 screenshot_bytes = await self.page.screenshot(full_page=False)
 
-        # Send to Telegram
+        # ── [PRIMARY] Attempt AI-powered solving via Gemini ─────────────────
+        ai_solution = await self._solve_with_gemini(screenshot_bytes)
+        if ai_solution:
+            print(f"[CAPTCHA] 🤖 Gemini auto-solved captcha: '{ai_solution}'")
+            await self.telegram.send(
+                f"🤖 *AI attempting captcha automatically:* `{ai_solution}`"
+            )
+            return ai_solution
+
+        # ── [FALLBACK] Send to Telegram for manual solving ───────────────────
+        print("[CAPTCHA] 🔄 Gemini unavailable/failed — requesting manual reply via Telegram.")
         await self.telegram.send_photo(
             image_bytes=screenshot_bytes,
             caption=(
@@ -143,6 +156,53 @@ class CaptchaHandler:
             )
 
         return solution
+
+    async def _solve_with_gemini(self, screenshot_bytes: bytes) -> Optional[str]:
+        """
+        Attempt to read the CAPTCHA text using the Gemini Vision API.
+
+        Reads GEMINI_API_KEY from the environment; returns None immediately if
+        the key is absent or if the API call fails for any reason, so the caller
+        can fall back to the manual Telegram flow without interruption.
+        """
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            print("[CAPTCHA] GEMINI_API_KEY not set — skipping AI CAPTCHA solve.")
+            return None
+
+        try:
+            from google import genai          # lazy import — not needed everywhere
+            from google.genai import types
+
+            client = genai.Client(api_key=api_key)
+
+            prompt = (
+                "This image shows a CAPTCHA verification code used on a website. "
+                "Your task is to read the exact characters displayed in the image. "
+                "Reply with ONLY the CAPTCHA text (letters and/or digits). "
+                "Do NOT include spaces, punctuation, explanations, or any other text. "
+                "If the image is unclear or you are unsure, reply with an empty string."
+            )
+
+            response = await client.aio.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[
+                    types.Part.from_bytes(data=screenshot_bytes, mime_type="image/png"),
+                    prompt,
+                ],
+            )
+
+            raw = response.text.strip()
+            # Sanity-check: CAPTCHA codes are typically 4–8 alphanumeric characters
+            if raw and re.match(r'^[A-Za-z0-9]{3,10}$', raw):
+                return raw
+
+            print(f"[CAPTCHA] Gemini response failed sanity check: '{raw}'")
+            return None
+
+        except Exception as exc:
+            print(f"[CAPTCHA] Gemini API error: {exc}")
+            return None
 
     async def enter_solution(self, solution: str) -> bool:
         """Type the solved captcha text into the input field."""
