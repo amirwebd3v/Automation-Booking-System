@@ -171,6 +171,11 @@ class CaptchaHandler:
             return None
 
         try:
+            import aiohttp
+            # Patch for google-genai bug with aiohttp exceptions
+            if not hasattr(aiohttp, "ClientConnectorDNSError"):
+                aiohttp.ClientConnectorDNSError = aiohttp.ClientConnectorError
+
             from google import genai          # lazy import — not needed everywhere
             from google.genai import types
 
