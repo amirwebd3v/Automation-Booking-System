@@ -1,75 +1,142 @@
 import sys
+import io
 import unittest.mock
 from pathlib import Path
+from unittest.mock import MagicMock, patch, call
 import pytest
-import aiohttp
-import os
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+import captcha_handler
 from captcha_handler import CaptchaHandler
+
 
 class FakePage:
     pass
 
+
 class FakeTelegram:
     pass
 
+
+def _make_valid_image_bytes() -> bytes:
+    """Create a minimal valid PNG in memory (1x1 white pixel)."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (60, 20), color=(255, 255, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@pytest.fixture(autouse=True)
+def reset_trocr_cache():
+    """Ensure module-level model cache is cleared between tests."""
+    captcha_handler._trocr_processor = None
+    captcha_handler._trocr_model = None
+    yield
+    captcha_handler._trocr_processor = None
+    captcha_handler._trocr_model = None
+
+
+# ---------------------------------------------------------------------------
+# Helper: build mock processor + model that return a given text
+# ---------------------------------------------------------------------------
+
+def _build_mocks(decoded_text: str):
+    mock_processor = MagicMock()
+    mock_model = MagicMock()
+
+    # processor(images=..., return_tensors="pt").pixel_values  -> a tensor-like mock
+    pixel_values_mock = MagicMock()
+    mock_processor.return_value.pixel_values = pixel_values_mock
+
+    # model.generate(pixel_values) -> generated_ids mock
+    generated_ids_mock = MagicMock()
+    mock_model.generate.return_value = generated_ids_mock
+
+    # processor.batch_decode(generated_ids, skip_special_tokens=True) -> list
+    mock_processor.batch_decode.return_value = [decoded_text]
+
+    return mock_processor, mock_model
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
 @pytest.mark.asyncio
-async def test_solve_with_gemini_aiohttp_patch(monkeypatch):
+async def test_trocr_returns_text_on_success():
     """
-    Test that the aiohttp.ClientConnectorDNSError bug in google-genai
-    is properly patched so we don't get 'module aiohttp has no attribute...' errors.
+    When TrOCR successfully decodes a valid alphanumeric string that passes
+    the sanity regex, _solve_with_trocr should return that string.
     """
-    monkeypatch.setenv("GEMINI_API_KEY", "FAKE_KEY_FOR_TEST")
-    
-    # We want to simulate the scenario where google.genai tries to catch the exception. 
-    # Simply calling the method should apply the patch.
-    # To test it cleanly without making a real API call or requiring google-genai to be fully functional, 
-    # we can just ensure that after _solve_with_gemini runs, aiohttp has the attribute.
-    
-    # If the attribute exists somehow before the test (due to other tests), delete it to test the patch
-    if hasattr(aiohttp, "ClientConnectorDNSError"):
-        del aiohttp.ClientConnectorDNSError
+    mock_processor, mock_model = _build_mocks("AB12")
 
-    handler = CaptchaHandler(FakePage(), FakeTelegram())
-    
-    # Mock 'google' so it fails gracefully after the patch or just mock the Client
-    with unittest.mock.patch.dict(sys.modules):
-        # We can just let it run. Without a valid key and with network mocked out,
-        # it normally would crash. We can mock the google.genai client to raise a client error,
-        # but to prove the patch runs, we just need to ensure the attribute gets set.
-        
-        # We mock the genai.Client so we don't do real requests
-        mock_genai = unittest.mock.MagicMock()
-        monkeypatch.setitem(sys.modules, "google.genai", mock_genai)
-        monkeypatch.setitem(sys.modules, "google", mock_genai)
-        
-        await handler._solve_with_gemini(b"fake_image_bytes")
+    with patch("captcha_handler._load_trocr_model", return_value=(mock_processor, mock_model)):
+        handler = CaptchaHandler(FakePage(), FakeTelegram())
+        result = await handler._solve_with_trocr(_make_valid_image_bytes())
 
-    # The patch should have applied ClientConnectorError back into ClientConnectorDNSError
-    assert hasattr(aiohttp, "ClientConnectorDNSError"), "aiohttp.ClientConnectorDNSError should be patched"
-    assert aiohttp.ClientConnectorDNSError is aiohttp.ClientConnectorError
+    assert result == "AB12"
+
 
 @pytest.mark.asyncio
-async def test_solve_with_gemini_handles_exceptions_gracefully(monkeypatch):
+async def test_trocr_returns_none_on_exception():
     """
-    Test that if the Gemini API throws a random exception, it is caught
-    and returns None instead of crashing the process.
+    If _load_trocr_model raises (e.g. transformers not installed / network
+    unavailable), _solve_with_trocr must return None without propagating.
     """
-    monkeypatch.setenv("GEMINI_API_KEY", "FAKE_KEY_FOR_TEST")
+    with patch("captcha_handler._load_trocr_model", side_effect=RuntimeError("model unavailable")):
+        handler = CaptchaHandler(FakePage(), FakeTelegram())
+        result = await handler._solve_with_trocr(_make_valid_image_bytes())
 
-    handler = CaptchaHandler(FakePage(), FakeTelegram())
+    assert result is None
 
-    class FakeClient:
-        class aio:
-            class models:
-                @staticmethod
-                async def generate_content(*args, **kwargs):
-                    raise Exception("Mocked Gemini API Error")
 
-    with unittest.mock.patch("google.genai.Client", return_value=FakeClient()):
-        result = await handler._solve_with_gemini(b"fake_image_bytes")
-        assert result is None  # Should gracefully catch the exception and return None
+@pytest.mark.asyncio
+async def test_trocr_returns_none_on_sanity_fail():
+    """
+    If the model returns text that does NOT match r'^[A-Za-z0-9]{3,10}$'
+    (spaces, punctuation, too long, etc.), _solve_with_trocr returns None
+    so the caller falls back to the Telegram manual flow.
+    """
+    for bad_text in ["hello world!", "??", "A" * 11, ""]:
+        mock_processor, mock_model = _build_mocks(bad_text)
+        with patch("captcha_handler._load_trocr_model", return_value=(mock_processor, mock_model)):
+            handler = CaptchaHandler(FakePage(), FakeTelegram())
+            result = await handler._solve_with_trocr(_make_valid_image_bytes())
+        assert result is None, f"Expected None for bad text '{bad_text}', got '{result}'"
+
+
+@pytest.mark.asyncio
+async def test_trocr_model_cached_after_first_call():
+    """
+    _load_trocr_model should only call TrOCRProcessor.from_pretrained and
+    VisionEncoderDecoderModel.from_pretrained ONCE across multiple
+    _solve_with_trocr invocations (module-level cache).
+    """
+    mock_processor, mock_model = _build_mocks("XY99")
+
+    with patch("captcha_handler.TrOCRProcessor" if False else "transformers.TrOCRProcessor") as _:
+        # Patch _load_trocr_model itself but count real-model invocations via
+        # the module globals after the first real load.
+        # Strategy: let _load_trocr_model run normally but mock from_pretrained.
+        from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+
+        img_bytes = _make_valid_image_bytes()
+
+        with patch.object(
+            TrOCRProcessor, "from_pretrained", return_value=mock_processor
+        ) as mock_proc_load, patch.object(
+            VisionEncoderDecoderModel, "from_pretrained", return_value=mock_model
+        ) as mock_model_load:
+            handler = CaptchaHandler(FakePage(), FakeTelegram())
+
+            # First call — should trigger a load
+            await handler._solve_with_trocr(img_bytes)
+            # Second call — should reuse the cache
+            await handler._solve_with_trocr(img_bytes)
+
+        # from_pretrained must have been called exactly once each
+        assert mock_proc_load.call_count == 1, "TrOCRProcessor.from_pretrained called more than once"
+        assert mock_model_load.call_count == 1, "VisionEncoderDecoderModel.from_pretrained called more than once"
