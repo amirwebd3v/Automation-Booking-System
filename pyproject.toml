@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sim24-bot"
+version = "0.0.1"
+description = "Automation Booking System (sim24 Telegram bot)"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[tool.ruff]
+line-length = 88
+
+[tool.black]
+line-length = 88
