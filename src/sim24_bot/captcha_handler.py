@@ -26,7 +26,7 @@ import io
 import asyncio
 from typing import Optional, Tuple
 from playwright.async_api import Page
-from telegram_notify import TelegramNotifier
+from .telegram_notify import TelegramNotifier
 
 # ── Module-level TrOCR model cache ───────────────────────────────────────────
 # Populated lazily on the first captcha solve attempt; reused for all

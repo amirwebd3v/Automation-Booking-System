@@ -44,7 +44,7 @@ class Sim24Login:
         Caller is responsible for calling browser.close() when done.
         """
         # Import here to avoid circular dependency (CaptchaHandler also imports TelegramNotifier)
-        from captcha_handler import CaptchaHandler
+        from .captcha_handler import CaptchaHandler
 
         playwright = await async_playwright().start()
 
