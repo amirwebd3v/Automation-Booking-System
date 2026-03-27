@@ -3,24 +3,54 @@ Captcha Handler
 ───────────────
 When the booking form presents a captcha:
   1. Take a focused screenshot of the captcha element
-  2. [PRIMARY]  Try Gemini Vision API to auto-read the code
-  3. [FALLBACK] If AI unavailable/wrong, send to Telegram and wait for a
-                human reply (up to 3 minutes)
+  2. [PRIMARY]  Try local TrOCR model (microsoft/trocr-small-printed) to
+                auto-read the code — runs fully offline, no API key needed
+  3. [FALLBACK] If TrOCR unavailable/fails sanity check, send to Telegram
+                and wait for a human reply (up to 3 minutes)
   4. Return the solution text (or None on timeout)
 
 Retry flow (solve_with_retry):
-  - On each attempt, tries Gemini first, then Telegram as fall-back
+  - On each attempt, tries TrOCR first, then Telegram as fall-back
   - Clicks the Aktivieren button in the dialog
   - Detects "nicht korrekt" error and retries with a freshly reloaded image
   - Returns True when captcha accepted, False after max attempts or timeout
+
+TrOCR model loading:
+  - Model is cached at module level; downloaded from HuggingFace on first
+    use (~250 MB) then cached in ~/.cache/huggingface for subsequent runs.
+  - Inference runs in asyncio.to_thread() to avoid blocking the event loop.
 """
 
 import re
-import os
+import io
 import asyncio
+from typing import Optional, Tuple
 from playwright.async_api import Page
 from telegram_notify import TelegramNotifier
-from typing import Optional
+
+# ── Module-level TrOCR model cache ───────────────────────────────────────────
+# Populated lazily on the first captcha solve attempt; reused for all
+# subsequent captchas within the same process run.
+_trocr_processor = None
+_trocr_model     = None
+
+
+def _load_trocr_model() -> Tuple[object, object]:
+    """
+    Load (or return cached) TrOCRProcessor and VisionEncoderDecoderModel.
+    Downloads weights from HuggingFace on first call (~250 MB), then uses
+    the local HuggingFace cache.  Returns (processor, model) or raises.
+    """
+    global _trocr_processor, _trocr_model
+    if _trocr_processor is not None and _trocr_model is not None:
+        return _trocr_processor, _trocr_model
+
+    from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+    print("[CAPTCHA] Loading TrOCR model (microsoft/trocr-small-printed) …")
+    _trocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-small-printed")
+    _trocr_model     = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-small-printed")
+    print("[CAPTCHA] TrOCR model loaded and cached.")
+    return _trocr_processor, _trocr_model
 
 
 # Possible selectors for image-based captcha on the sim24 portal
@@ -126,17 +156,17 @@ class CaptchaHandler:
             except Exception:
                 screenshot_bytes = await self.page.screenshot(full_page=False)
 
-        # ── [PRIMARY] Attempt AI-powered solving via Gemini ─────────────────
-        ai_solution = await self._solve_with_gemini(screenshot_bytes)
+        # ── [PRIMARY] Attempt AI-powered solving via TrOCR ──────────────────
+        ai_solution = await self._solve_with_trocr(screenshot_bytes)
         if ai_solution:
-            print(f"[CAPTCHA] 🤖 Gemini auto-solved captcha: '{ai_solution}'")
+            print(f"[CAPTCHA] 🤖 TrOCR auto-solved captcha: '{ai_solution}'")
             await self.telegram.send(
                 f"🤖 *AI attempting captcha automatically:* `{ai_solution}`"
             )
             return ai_solution
 
         # ── [FALLBACK] Send to Telegram for manual solving ───────────────────
-        print("[CAPTCHA] 🔄 Gemini unavailable/failed — requesting manual reply via Telegram.")
+        print("[CAPTCHA] 🔄 TrOCR unavailable/failed — requesting manual reply via Telegram.")
         await self.telegram.send_photo(
             image_bytes=screenshot_bytes,
             caption=(
@@ -157,56 +187,43 @@ class CaptchaHandler:
 
         return solution
 
-    async def _solve_with_gemini(self, screenshot_bytes: bytes) -> Optional[str]:
+    async def _solve_with_trocr(self, screenshot_bytes: bytes) -> Optional[str]:
         """
-        Attempt to read the CAPTCHA text using the Gemini Vision API.
+        Attempt to read the CAPTCHA text using the local TrOCR model
+        (microsoft/trocr-small-printed).  No network call or API key required
+        after the first-time model download.
 
-        Reads GEMINI_API_KEY from the environment; returns None immediately if
-        the key is absent or if the API call fails for any reason, so the caller
-        can fall back to the manual Telegram flow without interruption.
+        Runs inference inside asyncio.to_thread() so the async event loop is
+        never blocked by the CPU-bound forward pass.  Returns None on any
+        failure so the caller falls back to the Telegram manual flow.
         """
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            print("[CAPTCHA] GEMINI_API_KEY not set — skipping AI CAPTCHA solve.")
+        try:
+            processor, model = _load_trocr_model()
+        except Exception as exc:
+            print(f"[CAPTCHA] TrOCR model load failed: {exc}")
             return None
 
         try:
-            import aiohttp
-            # Patch for google-genai bug with aiohttp exceptions
-            if not hasattr(aiohttp, "ClientConnectorDNSError"):
-                aiohttp.ClientConnectorDNSError = aiohttp.ClientConnectorError
+            from PIL import Image
 
-            from google import genai          # lazy import — not needed everywhere
-            from google.genai import types
+            image = Image.open(io.BytesIO(screenshot_bytes)).convert("RGB")
 
-            client = genai.Client(api_key=api_key)
+            def _run_inference():
+                pixel_values  = processor(images=image, return_tensors="pt").pixel_values
+                generated_ids = model.generate(pixel_values)
+                return processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
 
-            prompt = (
-                "This image shows a CAPTCHA verification code used on a website. "
-                "Your task is to read the exact characters displayed in the image. "
-                "Reply with ONLY the CAPTCHA text (letters and/or digits). "
-                "Do NOT include spaces, punctuation, explanations, or any other text. "
-                "If the image is unclear or you are unsure, reply with an empty string."
-            )
+            raw = await asyncio.to_thread(_run_inference)
 
-            response = await client.aio.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=[
-                    types.Part.from_bytes(data=screenshot_bytes, mime_type="image/png"),
-                    prompt,
-                ],
-            )
-
-            raw = response.text.strip()
-            # Sanity-check: CAPTCHA codes are typically 4–8 alphanumeric characters
+            # Sanity-check: CAPTCHA codes are typically 3–10 alphanumeric characters
             if raw and re.match(r'^[A-Za-z0-9]{3,10}$', raw):
                 return raw
 
-            print(f"[CAPTCHA] Gemini response failed sanity check: '{raw}'")
+            print(f"[CAPTCHA] TrOCR response failed sanity check: '{raw}'")
             return None
 
         except Exception as exc:
-            print(f"[CAPTCHA] Gemini API error: {exc}")
+            print(f"[CAPTCHA] TrOCR inference error: {exc}")
             return None
 
     async def enter_solution(self, solution: str) -> bool:
