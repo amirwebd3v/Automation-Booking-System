@@ -19,8 +19,8 @@ Flow:
 import asyncio
 import re
 from playwright.async_api import Page
-from telegram_notify import TelegramNotifier
-from captcha_handler import CaptchaHandler
+from .telegram_notify import TelegramNotifier
+from .captcha_handler import CaptchaHandler
 
 
 BOOK_BUTTON_SELECTORS = [
@@ -88,9 +88,6 @@ class BookingModule:
             await asyncio.sleep(0.5)
 
         # ── Steps 2–3: Click Buchen while capturing getChangeServiceInfo ───
-        # expect_response must wrap the click so the listener is active when
-        # the AJAX call fires.  Timeout is generous (30 s) to survive a slow
-        # standard-click timeout + force-click attempt.
         clicked      = False
         click_method = None
         modal_html   = None
@@ -195,7 +192,6 @@ class BookingModule:
             captcha_handled = True
 
         # ── Step 6: Activate via parsed modal HTML ─────────────────────
-        # Skipped when captcha handler already submitted via Aktivieren button.
         activation_clicked = captcha_handled
 
         if not captcha_handled:
@@ -214,10 +210,6 @@ class BookingModule:
                 self._log("[BOOKING] ⚠️ No confirm action succeeded — proceeding to verify.")
 
         # ── Step 8: Check for captcha that appeared in the server's response ─
-        # This covers the case where the server returns a captcha challenge
-        # after the form is submitted (e.g. direct changeService call), which
-        # is different from the pre-activation captcha caught in Step 5.
-        # Wait for any loading spinner before checking DOM state.
         if not captcha_handled:
             await self._wait_for_loading()
         if not captcha_handled and await self.captcha.is_captcha_present():
@@ -397,9 +389,7 @@ class BookingModule:
               if (r.width > 0 && r.height > 0) return true;
             }
           }
-          return false;
-        }
-        """
+          return false;"""
         deadline = asyncio.get_event_loop().time() + timeout_seconds
         poll_no  = 0
         while asyncio.get_event_loop().time() < deadline:
