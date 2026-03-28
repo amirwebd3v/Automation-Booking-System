@@ -6,12 +6,12 @@ Runs on GitHub Actions every 30 minutes (controlled by the cron schedule).
 import sys
 import time
 import asyncio
-from sim24_bot.config_manager import ConfigManager
-from sim24_bot.telegram_notify import TelegramNotifier
-from sim24_bot.login import Sim24Login
-from sim24_bot.data_checker import DataChecker
-from sim24_bot.decision_engine import DecisionEngine
-from sim24_bot.booking import BookingModule
+from config_manager import ConfigManager
+from telegram_notify import TelegramNotifier
+from login import Sim24Login
+from data_checker import DataChecker
+from decision_engine import DecisionEngine
+from booking import BookingModule
 
 
 async def main():

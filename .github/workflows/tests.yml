@@ -23,28 +23,11 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Restore Hugging Face cache
-        id: hf-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: ${{ runner.os }}-huggingface-cache-v1
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest pytest-asyncio
-
-      - name: Pre-download TrOCR model (if cache miss)
-        if: steps.hf-cache.outputs.cache-hit != 'true'
-        run: |
-          python - <<'PY'
-          from transformers import AutoProcessor, VisionEncoderDecoderModel
-          AutoProcessor.from_pretrained("microsoft/trocr-small-printed")
-          VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-small-printed")
-          print("TrOCR model downloaded")
-          PY
 
       - name: Run tests
         run: |
