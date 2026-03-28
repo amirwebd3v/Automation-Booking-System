@@ -36,10 +36,13 @@ jobs:
           key: ${{ runner.os }}-huggingface-cache-v1
 
       # ── Install Python dependencies ──────────────────────────────────────
+      # Required repository secrets: GIST_TOKEN (GitHub personal access token
+      # with gist scope) and GIST_ID (the ID of the Gist used for persistence).
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -e .
 
       - name: Pre-download TrOCR model (if cache miss)
         if: steps.hf-cache.outputs.cache-hit != 'true'
