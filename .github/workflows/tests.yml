@@ -30,4 +30,4 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest -q tests
+          pytest -q -m "not live" tests

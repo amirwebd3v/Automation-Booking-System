@@ -74,6 +74,7 @@ class CaptchaSolveError(CaptchaAutomationError):
 
 
 _CONFIGURED_GEMINI_KEY: Optional[str] = None
+_RESOLVED_GEMINI_MODEL: Optional[str] = None
 
 
 def _configure_gemini() -> None:
@@ -91,9 +92,44 @@ def _configure_gemini() -> None:
         _CONFIGURED_GEMINI_KEY = api_key
 
 
-async def _extract_gemini_text(image_b64: str) -> str:
+def _resolve_gemini_model() -> str:
+    global _RESOLVED_GEMINI_MODEL
+
+    if _RESOLVED_GEMINI_MODEL is not None:
+        return _RESOLVED_GEMINI_MODEL
+
     _configure_gemini()
-    model = genai.GenerativeModel("gemini-1.5-flash")
+
+    configured_model = os.environ.get("GEMINI_MODEL", "").strip()
+    preferred_models = [
+        configured_model,
+        "gemini-1.5-flash",
+        "gemini-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+    ]
+
+    available_models = {
+        model.name for model in genai.list_models()
+        if "generateContent" in getattr(model, "supported_generation_methods", [])
+    }
+
+    for model_name in preferred_models:
+        if not model_name:
+            continue
+        normalized_name = model_name if model_name.startswith("models/") else f"models/{model_name}"
+        if normalized_name in available_models:
+            _RESOLVED_GEMINI_MODEL = normalized_name.removeprefix("models/")
+            print(f"[CAPTCHA] Using Gemini model: {_RESOLVED_GEMINI_MODEL}")
+            return _RESOLVED_GEMINI_MODEL
+
+    raise CaptchaConfigurationError(
+        "No supported Gemini Flash model is available for this API key."
+    )
+
+
+async def _extract_gemini_text(image_b64: str) -> str:
+    model = genai.GenerativeModel(_resolve_gemini_model())
     response = await asyncio.to_thread(
         model.generate_content,
         [

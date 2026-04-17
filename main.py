@@ -12,6 +12,7 @@ from captcha_handler import CaptchaSolveError
 
 
 def _build_run_summary(
+    used_gb: float,
     remaining_gb: float,
     total_gb: float,
     should_book: bool,
@@ -20,13 +21,14 @@ def _build_run_summary(
     if not should_book:
         action = "No action needed."
     elif booking_success:
-        action = "2 GB packet booked successfully."
+        action = "✅ 2 GB packet booked successfully."
     else:
-        action = "Booking attempt did not confirm success."
+        action = "❌ Booking did not complete — see error details above."
 
     return (
         "✅ *Run complete.*\n"
-        f"Remaining data: `{remaining_gb:.2f} GB` of `{total_gb:.2f} GB`\n"
+        f"Used: `{used_gb:.2f} GB` / Total: `{total_gb:.2f} GB`\n"
+        f"Remaining: `{remaining_gb:.2f} GB`\n"
         f"Action: {action}"
     )
 
@@ -98,6 +100,7 @@ async def main():
 
         await telegram.send(
             _build_run_summary(
+                used_gb=used_gb,
                 remaining_gb=remaining_gb,
                 total_gb=total_gb,
                 should_book=should_book,
