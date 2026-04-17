@@ -20,7 +20,7 @@ import asyncio
 import re
 from playwright.async_api import Page
 from telegram_notify import TelegramNotifier
-from captcha_handler import CaptchaHandler
+from captcha_handler import CaptchaHandler, MODAL_SELECTOR, SPINNER_SELECTORS
 
 
 BOOK_BUTTON_SELECTORS = [
@@ -57,12 +57,6 @@ class BookingModule:
         button, selector_used = await self._find_booking_button()
         if button is None:
             self._log("[BOOKING] ❌ Book button not found.")
-            await self.telegram.send(
-                "⚠️ *Booking button not found.*\n"
-                "The page structure may have changed.\n\n"
-                f"*Trace:*\n{self._trace_text()}"
-            )
-            await self._send_debug_screenshot("booking-button-not-found")
             return False
 
         self._log(f"[BOOKING] ✅ Booking button found via: `{selector_used}`")
@@ -85,7 +79,6 @@ class BookingModule:
                 }
                 """
             )
-            await asyncio.sleep(0.5)
 
         # ── Steps 2–3: Click Buchen while capturing getChangeServiceInfo ───
         # expect_response must wrap the click so the listener is active when
@@ -162,34 +155,24 @@ class BookingModule:
         # Fail fast if nothing was clicked.
         if not clicked:
             self._log("[BOOKING] ❌ All click methods failed.")
-            await self.telegram.send(
-                "❌ *Booking click failed.*\n\n"
-                f"*Trace:*\n{self._trace_text()}"
-            )
-            await self._send_debug_screenshot("booking-click-failed")
             return False
 
         self._log(f"[BOOKING] ✅ Book button clicked via {click_method}.")
 
-        await asyncio.sleep(2)
+        await self._wait_for_booking_modal(timeout_seconds=10)
 
         # ── Step 4: Dismiss cookie consent if it appeared ─────────────────
         if await self._handle_cookie_consent():
             self._log("[BOOKING] ✅ Cookie consent dismissed.")
-            await asyncio.sleep(1)
+            await self._wait_for_booking_modal(timeout_seconds=10)
 
         # ── Step 5: Handle captcha if present ─────────────────────────
         captcha_handled = False
         if await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha detected.")
-            await self.telegram.send(
-                "🔐 *Captcha appeared during booking.*\n"
-                "Sending image to Telegram — please reply with the code shown."
-            )
             captcha_ok = await self.captcha.solve_with_retry(max_attempts=3)
             if not captcha_ok:
-                self._log("[BOOKING] ❌ Captcha solving failed or timed out.")
-                await self._send_debug_screenshot("booking-captcha-failed")
+                self._log("[BOOKING] ❌ Captcha solving failed.")
                 return False
             self._log("[BOOKING] ✅ Captcha solved and Aktivieren clicked.")
             captcha_handled = True
@@ -199,7 +182,9 @@ class BookingModule:
         activation_clicked = captcha_handled
 
         if not captcha_handled:
-            if modal_html:
+            activation_clicked = await self._activate_from_modal()
+
+            if not activation_clicked and modal_html:
                 activation_clicked = await self._activate_from_html(modal_html)
 
             # ── Step 7: Fallback — call changeService directly ─────────
@@ -222,22 +207,14 @@ class BookingModule:
             await self._wait_for_loading()
         if not captcha_handled and await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha appeared in server response after activation.")
-            await self.telegram.send(
-                "🔐 *Captcha required by server.*\n"
-                "Sending image to Telegram — please reply with the code shown."
-            )
             captcha_ok = await self.captcha.solve_with_retry(max_attempts=3)
             if not captcha_ok:
-                self._log("[BOOKING] ❌ Post-activation captcha failed or timed out.")
-                await self._send_debug_screenshot("booking-captcha-post-failed")
+                self._log("[BOOKING] ❌ Post-activation captcha failed.")
                 return False
             self._log("[BOOKING] ✅ Post-activation captcha solved and Aktivieren clicked.")
 
         # ── Step 9: Verify booking success ────────────────────────────────
-        success = await self._verify_success()
-        if not success:
-            await self._send_debug_screenshot("booking-verify-failed")
-        return success
+        return await self._verify_success()
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -259,11 +236,36 @@ class BookingModule:
                 if btn and await btn.is_visible():
                     print(f"[BOOKING] Cookie consent via: {sel}")
                     await btn.click()
-                    await asyncio.sleep(1)
+                    await self._wait_for_loading(timeout_seconds=10)
                     return True
             except Exception:
                 continue
         return False
+
+    async def _wait_for_booking_modal(self, timeout_seconds: int = 10) -> bool:
+        try:
+            await self.page.wait_for_selector(
+                MODAL_SELECTOR,
+                state="visible",
+                timeout=timeout_seconds * 1000,
+            )
+            self._log("[BOOKING] ✅ Booking modal is visible.")
+            return True
+        except Exception:
+            self._log("[BOOKING] Modal did not become visible before timeout.")
+            return False
+
+    async def _activate_from_modal(self) -> bool:
+        modal_visible = await self._wait_for_booking_modal(timeout_seconds=10)
+        if not modal_visible:
+            return False
+
+        clicked = await self.captcha.click_aktivieren()
+        if clicked:
+            self._log("[BOOKING] ✅ Aktivieren clicked via modal locator.")
+        else:
+            self._log("[BOOKING] ⚠️ Modal visible but Aktivieren locator did not click.")
+        return clicked
 
     async def _activate_from_html(self, html: str) -> bool:
         """
@@ -355,73 +357,28 @@ class BookingModule:
         return False
 
     async def _wait_for_loading(self, timeout_seconds: int = 30) -> None:
-        """
-        Poll until the 'wird geladen' spinner overlay disappears from the DOM,
-        then wait for network idle. Gives up after timeout_seconds and proceeds.
-        """
-        IS_LOADING_JS = """
-        () => {
-          // 1. Exact 'wird geladen' text visible anywhere on the page
-          const walker = document.createTreeWalker(
-            document.body, NodeFilter.SHOW_TEXT
-          );
-          let node;
-          while ((node = walker.nextNode())) {
-            if (node.textContent.trim().toLowerCase() === 'wird geladen') {
-              const el = node.parentElement;
-              if (el) {
-                const r = el.getBoundingClientRect();
-                const s = window.getComputedStyle(el);
-                if (r.width > 0 && r.height > 0
-                    && s.display !== 'none'
-                    && s.visibility !== 'hidden'
-                    && s.opacity !== '0') {
-                  return true;
-                }
-              }
-            }
-          }
-          // 2. Visible spinner/loading overlay elements
-          //    Exclude the booking/captcha dialog (dialog#c-overlay)
-          const sels = [
-            '[class*="spinner"]:not(dialog)',
-            '[class*="loading-overlay"]',
-            '[class*="page-loading"]',
-          ];
-          for (const sel of sels) {
-            for (const el of document.querySelectorAll(sel)) {
-              const s = window.getComputedStyle(el);
-              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
-                continue;
-              const r = el.getBoundingClientRect();
-              if (r.width > 0 && r.height > 0) return true;
-            }
-          }
-          return false;
-        }
-        """
-        deadline = asyncio.get_event_loop().time() + timeout_seconds
-        poll_no  = 0
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                still_loading = await self.page.evaluate(IS_LOADING_JS)
-            except Exception:
-                break  # page navigated or crashed — let verify sort it out
-            if not still_loading:
-                if poll_no > 0:
-                    self._log(f"[BOOKING] ✅ Loading finished after ~{poll_no * 0.5:.1f}s.")
-                break
-            if poll_no == 0:
-                self._log("[BOOKING] ⏳ Waiting for loading spinner to finish...")
-            poll_no += 1
-            await asyncio.sleep(0.5)
-        else:
-            self._log(f"[BOOKING] ⚠️ Loading still present after {timeout_seconds}s — proceeding anyway.")
-        # Also drain any in-flight network requests
-        try:
-            await self.page.wait_for_load_state("networkidle", timeout=5_000)
-        except Exception:
-            pass
+                timeout_ms = timeout_seconds * 1000
+                self._log("[BOOKING] ⏳ Waiting for loading indicators to clear...")
+
+                for selector in SPINNER_SELECTORS:
+                        locator = self.page.locator(selector).first
+                        try:
+                                if await locator.count() and await locator.is_visible():
+                                        await self.page.wait_for_selector(selector, state="hidden", timeout=timeout_ms)
+                        except Exception:
+                                continue
+
+                try:
+                        loading_text = self.page.get_by_text("Wird geladen")
+                        if await loading_text.first.count() and await loading_text.first.is_visible():
+                                await loading_text.first.wait_for(state="hidden", timeout=timeout_ms)
+                except Exception:
+                        pass
+
+                try:
+                        await self.page.wait_for_load_state("networkidle", timeout=5_000)
+                except Exception:
+                        pass
 
     async def _verify_success(self) -> bool:
         # Wait for any loading spinner to clear before inspecting page content.
@@ -459,10 +416,6 @@ class BookingModule:
                            "ungueltig", "ungültig", "ein fehler ist aufgetreten"]:
                     if kw in content_lower:
                         self._log(f"[BOOKING] ❌ Failure keyword: `{kw}`")
-                        await self.telegram.send(
-                            f"❌ *Booking failed.*\nDetected: `{kw}`\n\n"
-                            f"*Trace:*\n{self._trace_text()}"
-                        )
                         return False
 
             except Exception as e:
@@ -475,11 +428,6 @@ class BookingModule:
             await asyncio.sleep(POLL_INTERVAL)
 
         self._log("[BOOKING] ❌ Outcome unclear after polling.")
-        await self.telegram.send(
-            "⚠️ *Booking submitted but outcome is unclear.*\n"
-            "Screenshot follows. Bot will retry if still below threshold.\n\n"
-            f"*Trace:*\n{self._trace_text()}"
-        )
         return False
 
     async def _has_processing_success_dialog(self, content_lower: str) -> bool:
@@ -559,16 +507,3 @@ class BookingModule:
             self._log(f"[BOOKING] Dialog-check skipped ({type(e).__name__}).")
             return False
 
-    async def _send_debug_screenshot(self, reason: str) -> None:
-        try:
-            shot = await self.page.screenshot(full_page=True)
-            await self.telegram.send_photo(
-                image_bytes=shot,
-                caption=(
-                    f"🧩 *Booking debug screenshot*\n"
-                    f"Reason: `{reason}`\n"
-                    f"URL: `{self.page.url}`"
-                ),
-            )
-        except Exception as e:
-            print(f"[BOOKING] Failed to send debug screenshot: {e}")

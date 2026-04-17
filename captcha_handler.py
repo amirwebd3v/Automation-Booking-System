@@ -1,27 +1,24 @@
-"""
-Captcha Handler
-───────────────
-When the booking form presents a captcha:
-  1. Take a focused screenshot of the captcha element
-  2. Send it to Telegram with an urgent prompt
-  3. Wait up to 3 minutes for the user to reply with the solution
-  4. Return the solution text (or None on timeout)
-
-Retry flow (solve_with_retry):
-  - Solves captcha interactively via Telegram
-  - Clicks the Aktivieren button in the dialog
-  - Detects "nicht korrekt" error and retries with a freshly reloaded image
-  - Returns True when captcha accepted, False after max attempts or timeout
-"""
+"""Autonomous CAPTCHA handling backed by Gemini 1.5 Flash."""
 
 import asyncio
-from playwright.async_api import Page
-from telegram_notify import TelegramNotifier
+import base64
+import os
+import re
 from typing import Optional
 
+from playwright.async_api import Page
 
-# Possible selectors for image-based captcha on the sim24 portal
-# These will be verified on first real run and updated if needed
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None
+
+
+CAPTCHA_PROMPT = (
+    "Read the alphanumeric text in this CAPTCHA. Respond ONLY with the "
+    "characters you see. No spaces, no punctuation, no other text."
+)
+
 CAPTCHA_SELECTORS = [
     "img[src*='captcha']",
     "img[alt*='captcha']",
@@ -32,7 +29,6 @@ CAPTCHA_SELECTORS = [
     "img[src*='code']",
 ]
 
-# Input field where we type the solved captcha text
 CAPTCHA_INPUT_SELECTORS = [
     "input[name*='captcha']",
     "input[id*='captcha']",
@@ -40,21 +36,12 @@ CAPTCHA_INPUT_SELECTORS = [
     "#captcha_code",
 ]
 
-# "Neuen Code anzeigen" reload link inside the captcha dialog
 CAPTCHA_RELOAD_SELECTORS = [
     "a.captcha_reload",
     "a[href^='javascript:reload_captcha']",
     ".reload a",
 ]
 
-# Aktivieren submit button inside the captcha dialog
-AKTIVIEREN_SELECTORS = [
-    "a[title='Aktivieren']",
-    "[id^='ButtonAktivieren-ChangeServiceType-getChangeServiceInfo-']",
-    "a.button2FormModal",
-]
-
-# Page text fragments that confirm the CAPTCHA answer was rejected
 CAPTCHA_ERROR_TEXTS = [
     "der eingegebene code ist nicht korrekt",
     "code ist nicht korrekt",
@@ -63,104 +50,140 @@ CAPTCHA_ERROR_TEXTS = [
     "ungültiger captcha",
 ]
 
+MODAL_SELECTOR = "div.c-overlay-content"
+SPINNER_SELECTORS = [
+    ".loading-overlay",
+    ".page-loading",
+    ".spinner",
+    "[class*='loading-overlay']",
+    "[class*='page-loading']",
+    "[class*='spinner']",
+]
+
+
+class CaptchaAutomationError(RuntimeError):
+    """Base class for autonomous CAPTCHA errors."""
+
+
+class CaptchaConfigurationError(CaptchaAutomationError):
+    """Raised when required Gemini configuration is missing."""
+
+
+class CaptchaSolveError(CaptchaAutomationError):
+    """Raised when Gemini cannot solve the CAPTCHA within the retry budget."""
+
+
+_CONFIGURED_GEMINI_KEY: Optional[str] = None
+
+
+def _configure_gemini() -> None:
+    global _CONFIGURED_GEMINI_KEY
+
+    if genai is None:
+        raise CaptchaConfigurationError("google-generativeai is not installed.")
+
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise CaptchaConfigurationError("GEMINI_API_KEY is not configured.")
+
+    if _CONFIGURED_GEMINI_KEY != api_key:
+        genai.configure(api_key=api_key)
+        _CONFIGURED_GEMINI_KEY = api_key
+
+
+async def _extract_gemini_text(image_b64: str) -> str:
+    _configure_gemini()
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = await asyncio.to_thread(
+        model.generate_content,
+        [
+            CAPTCHA_PROMPT,
+            {
+                "mime_type": "image/png",
+                "data": image_b64,
+            },
+        ],
+        generation_config={"temperature": 0},
+    )
+
+    response_text = getattr(response, "text", "") or ""
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", response_text).strip()
+    if not cleaned:
+        raise CaptchaAutomationError("Gemini returned an empty CAPTCHA response.")
+    return cleaned
+
+
+async def _find_first_visible_selector(page: Page, selectors: list[str]) -> Optional[str]:
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if await locator.count() and await locator.is_visible():
+                return selector
+        except Exception:
+            continue
+    return None
+
+
+async def _fill_captcha_input(page: Page, solution: str) -> bool:
+    input_selector = await _find_first_visible_selector(page, CAPTCHA_INPUT_SELECTORS)
+    if input_selector is None:
+        return False
+
+    field = page.locator(input_selector).first
+    await field.fill(solution)
+    return True
+
+
+async def solve_captcha_with_gemini(page: Page, captcha_element_selector: str) -> str:
+    """Capture a CAPTCHA image, solve it with Gemini, and fill the input field."""
+    captcha_element = page.locator(captcha_element_selector).first
+    await captcha_element.wait_for(state="visible", timeout=10_000)
+
+    screenshot_bytes = await captcha_element.screenshot(type="png")
+    image_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+    solution = await _extract_gemini_text(image_b64)
+
+    entered = await _fill_captcha_input(page, solution)
+    if not entered:
+        raise CaptchaAutomationError("CAPTCHA input field was not found.")
+
+    return solution
+
 
 class CaptchaHandler:
-    def __init__(self, page: Page, telegram: TelegramNotifier):
-        self.page     = page
+    def __init__(self, page: Page, telegram=None):
+        self.page = page
         self.telegram = telegram
 
+    async def get_captcha_selector(self) -> Optional[str]:
+        return await _find_first_visible_selector(self.page, CAPTCHA_SELECTORS)
+
     async def is_captcha_present(self) -> bool:
-        """Check if a captcha element exists on the current page."""
-        for selector in CAPTCHA_SELECTORS:
-            try:
-                element = await self.page.query_selector(selector)
-                if element and await element.is_visible():
-                    print(f"[CAPTCHA] Found captcha via selector: {selector}")
-                    return True
-            except Exception:
-                continue
+        selector = await self.get_captcha_selector()
+        if selector:
+            print(f"[CAPTCHA] Found captcha via selector: {selector}")
+            return True
         return False
 
     async def solve(self) -> Optional[str]:
-        """
-        Full captcha solving flow:
-          1. Find and screenshot the captcha image
-          2. Send to Telegram
-          3. Wait for user reply
-          4. Return the solution string
-        """
-        captcha_element = None
+        selector = await self.get_captcha_selector()
+        if selector is None:
+            print("[CAPTCHA] Could not find a visible captcha image.")
+            return None
 
-        # Find the captcha image element
-        for selector in CAPTCHA_SELECTORS:
-            try:
-                el = await self.page.query_selector(selector)
-                if el and await el.is_visible():
-                    captcha_element = el
-                    break
-            except Exception:
-                continue
-
-        if captcha_element is None:
-            # Fallback: screenshot the full visible viewport area
-            print("[CAPTCHA] Could not isolate captcha element — using viewport screenshot.")
-            screenshot_bytes = await self.page.screenshot(full_page=False)
-        else:
-            # Screenshot just the captcha element with some padding
-            try:
-                box = await captcha_element.bounding_box()
-                if box:
-                    # Add padding around the captcha for readability
-                    clip = {
-                        "x":      max(0, box["x"] - 20),
-                        "y":      max(0, box["y"] - 20),
-                        "width":  box["width"]  + 40,
-                        "height": box["height"] + 40,
-                    }
-                    screenshot_bytes = await self.page.screenshot(clip=clip)
-                else:
-                    screenshot_bytes = await captcha_element.screenshot()
-            except Exception:
-                screenshot_bytes = await self.page.screenshot(full_page=False)
-
-        # Send to Telegram
-        await self.telegram.send_photo(
-            image_bytes=screenshot_bytes,
-            caption=(
-                "🔐 *Captcha Required*\n"
-                "Please reply with the letters/numbers shown in the image.\n"
-                "⏳ You have *3 minutes* to respond."
-            )
-        )
-
-        # Wait for reply
-        solution = await self.telegram.wait_for_reply(timeout_seconds=180)
-
-        if solution is None:
-            await self.telegram.send(
-                "⏰ *Captcha timeout.* No reply received in 3 minutes.\n"
-                "Booking attempt aborted. Will retry next cycle."
-            )
-
+        solution = await solve_captcha_with_gemini(self.page, selector)
+        print(f"[CAPTCHA] Gemini solved captcha as: {solution}")
         return solution
 
     async def enter_solution(self, solution: str) -> bool:
-        """Type the solved captcha text into the input field."""
-        for selector in CAPTCHA_INPUT_SELECTORS:
-            try:
-                field = await self.page.query_selector(selector)
-                if field and await field.is_visible():
-                    await field.fill(solution)
-                    print(f"[CAPTCHA] Entered solution in field: {selector}")
-                    return True
-            except Exception:
-                continue
-
-        print("[CAPTCHA] Could not find captcha input field.")
-        return False
+        entered = await _fill_captcha_input(self.page, solution)
+        if entered:
+            print("[CAPTCHA] Entered solution into the captcha input field.")
+        else:
+            print("[CAPTCHA] Could not find captcha input field.")
+        return entered
 
     async def is_captcha_error(self) -> bool:
-        """Return True if the page currently shows a 'wrong captcha' error message."""
         try:
             content = (await self.page.content()).lower()
             return any(err in content for err in CAPTCHA_ERROR_TEXTS)
@@ -168,163 +191,121 @@ class CaptchaHandler:
             return False
 
     async def reload_captcha_image(self) -> bool:
-        """Click 'Neuen Code anzeigen' to fetch a fresh CAPTCHA image."""
-        for sel in CAPTCHA_RELOAD_SELECTORS:
+        current_selector = await self.get_captcha_selector()
+        current_src = None
+        if current_selector is not None:
             try:
-                el = await self.page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    await asyncio.sleep(1.5)  # Wait for the new image to load
-                    print(f"[CAPTCHA] Captcha image reloaded via: {sel}")
-                    return True
+                current_src = await self.page.locator(current_selector).first.get_attribute("src")
+            except Exception:
+                current_src = None
+
+        for selector in CAPTCHA_RELOAD_SELECTORS:
+            locator = self.page.locator(selector).first
+            try:
+                if not await locator.count() or not await locator.is_visible():
+                    continue
+
+                await locator.click()
+                if current_selector is not None and current_src:
+                    try:
+                        await self.page.wait_for_function(
+                            "([sel, src]) => {"
+                            "  const el = document.querySelector(sel);"
+                            "  return !!el && el.getAttribute('src') !== src;"
+                            "}",
+                            [current_selector, current_src],
+                            timeout=10_000,
+                        )
+                    except Exception:
+                        pass
+
+                await self.wait_for_loading(timeout_seconds=10)
+                print(f"[CAPTCHA] Captcha image reloaded via: {selector}")
+                return True
             except Exception:
                 continue
-        print("[CAPTCHA] Could not reload captcha image (reload link not found).")
+
+        print("[CAPTCHA] Could not reload captcha image.")
         return False
 
     async def click_aktivieren(self) -> bool:
-        """Click the Aktivieren button inside the captcha dialog to submit the form."""
-        for sel in AKTIVIEREN_SELECTORS:
+        modal = self.page.locator(MODAL_SELECTOR).first
+        try:
+            await modal.wait_for(state="visible", timeout=10_000)
+        except Exception:
+            print("[CAPTCHA] Modal container did not become visible.")
+            return False
+
+        candidates = [
+            modal.get_by_role("link", name="Aktivieren").first,
+            modal.locator("a[title='Aktivieren']").first,
+            modal.locator("a:has-text('Aktivieren')").first,
+        ]
+
+        for locator in candidates:
             try:
-                el = await self.page.query_selector(sel)
-                if el and await el.is_visible():
-                    await el.click()
-                    print(f"[CAPTCHA] Clicked Aktivieren via: {sel}")
-                    await self._wait_for_loading()  # Instead of fixed sleep
-                    return True
+                if not await locator.count() or not await locator.is_visible():
+                    continue
+
+                await locator.click()
+                print("[CAPTCHA] Clicked Aktivieren in modal.")
+                await self.wait_for_loading()
+                return True
             except Exception:
                 continue
-        print("[CAPTCHA] Could not find Aktivieren button in dialog.")
+
+        print("[CAPTCHA] Could not find Aktivieren button in modal.")
         return False
 
-    async def _wait_for_loading(self, timeout_seconds: int = 30) -> None:
-        """Poll until the 'wird geladen' spinner is gone (matches BookingModule logic)."""
-        IS_LOADING_JS = """
-        () => {
-          const walker = document.createTreeWalker(
-            document.body, NodeFilter.SHOW_TEXT
-          );
-          let node;
-          while ((node = walker.nextNode())) {
-            if (node.textContent.trim().toLowerCase() === 'wird geladen') {
-              const el = node.parentElement;
-              if (el) {
-                const r = el.getBoundingClientRect();
-                const s = window.getComputedStyle(el);
-                if (r.width > 0 && r.height > 0
-                    && s.display !== 'none'
-                    && s.visibility !== 'hidden'
-                    && s.opacity !== '0') {
-                  return true;
-                }
-              }
-            }
-          }
-          const sels = [
-            '[class*="spinner"]:not(dialog)',
-            '[class*="loading-overlay"]',
-            '[class*="page-loading"]',
-          ];
-          for (const sel of sels) {
-            for (const el of document.querySelectorAll(sel)) {
-              const s = window.getComputedStyle(el);
-              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0')
-                continue;
-              const r = el.getBoundingClientRect();
-              if (r.width > 0 && r.height > 0) return true;
-            }
-          }
-          return false;
-        }
-        """
-        deadline = asyncio.get_event_loop().time() + timeout_seconds
-        poll_no  = 0
-        while asyncio.get_event_loop().time() < deadline:
+    async def wait_for_loading(self, timeout_seconds: int = 30) -> None:
+        timeout_ms = timeout_seconds * 1000
+        for selector in SPINNER_SELECTORS:
+            locator = self.page.locator(selector).first
             try:
-                still_loading = await self.page.evaluate(IS_LOADING_JS)
+                if await locator.count() and await locator.is_visible():
+                    await self.page.wait_for_selector(selector, state="hidden", timeout=timeout_ms)
             except Exception:
-                break
-            if not still_loading:
-                if poll_no > 0:
-                    print(f"[CAPTCHA] ✅ Loading finished after ~{poll_no * 0.5:.1f}s.")
-                break
-            if poll_no == 0:
-                print("[CAPTCHA] ⏳ Waiting for loading spinner to finish...")
-            poll_no += 1
-            await asyncio.sleep(0.5)
-        else:
-            print(f"[CAPTCHA] ⚠️ Loading still present after {timeout_seconds}s — proceeding anyway.")
+                continue
+
+        try:
+            loading_text = self.page.get_by_text("Wird geladen")
+            if await loading_text.first.count() and await loading_text.first.is_visible():
+                await loading_text.first.wait_for(state="hidden", timeout=timeout_ms)
+        except Exception:
+            pass
+
         try:
             await self.page.wait_for_load_state("networkidle", timeout=5_000)
         except Exception:
             pass
 
     async def solve_with_retry(self, max_attempts: int = 3) -> bool:
-        """
-        Interactive Telegram CAPTCHA loop with retry on wrong answer.
+        last_error: Optional[Exception] = None
 
-        Each attempt:
-          1. (On retry) Reload the captcha image so the user sees a fresh code.
-          2. Screenshot the captcha and send it to Telegram.
-          3. Wait up to 3 minutes for the user's text reply.
-          4. Fill the answer into the input field.
-          5. Click the Aktivieren button.
-          6. Check whether the site rejected the answer ('nicht korrekt').
-             - If accepted: return True.
-             - If rejected: notify the user and try again.
-        Returns False when all attempts are exhausted or the user times out.
-        """
         for attempt in range(1, max_attempts + 1):
             print(f"[CAPTCHA] Solve attempt {attempt}/{max_attempts}")
 
-            # Reload captcha on retries so the user doesn't re-solve a stale image
             if attempt > 1:
                 await self.reload_captcha_image()
 
-            # Screenshot + send to Telegram + wait for reply
-            solution = await self.solve()
-            if solution is None:
-                # User did not reply in time — no point retrying
-                return False
+            try:
+                solution = await self.solve()
+                if solution is None:
+                    raise CaptchaAutomationError("Captcha image was not available for solving.")
 
-            # Enter the answer
-            if not await self.enter_solution(solution):
-                print("[CAPTCHA] Could not locate the captcha input field.")
-                await self.telegram.send(
-                    f"⚠️ *Could not enter captcha into field.* "
-                    f"(Attempt {attempt}/{max_attempts})"
-                )
-                continue
+                if not await self.click_aktivieren():
+                    raise CaptchaAutomationError("Aktivieren button was not clickable.")
 
-            await asyncio.sleep(0.3)
+                if not await self.is_captcha_error():
+                    print("[CAPTCHA] Captcha accepted.")
+                    return True
 
-            # Click Aktivieren to submit
-            if not await self.click_aktivieren():
-                print("[CAPTCHA] Could not locate the Aktivieren button.")
-                await self.telegram.send(
-                    f"⚠️ *Could not click Aktivieren.* "
-                    f"(Attempt {attempt}/{max_attempts})"
-                )
-                continue
+                last_error = CaptchaAutomationError("Gemini produced an incorrect CAPTCHA answer.")
+                print(f"[CAPTCHA] Incorrect captcha answer on attempt {attempt}.")
+            except CaptchaAutomationError as exc:
+                last_error = exc
+                print(f"[CAPTCHA] Attempt {attempt} failed: {exc}")
 
-            # Check whether the CAPTCHA was accepted
-            if not await self.is_captcha_error():
-                print("[CAPTCHA] ✅ Captcha accepted — submission in progress.")
-                return True
-
-            # Wrong code — notify and loop
-            print(f"[CAPTCHA] ❌ Wrong captcha code on attempt {attempt}.")
-            remaining = max_attempts - attempt
-            if remaining > 0:
-                await self.telegram.send(
-                    f"❌ *Wrong captcha code.* ({attempt}/{max_attempts} used)\n"
-                    f"Sending a new image... "
-                    f"{remaining} attempt{'s' if remaining != 1 else ''} remaining."
-                )
-            # Loop continues — reload + retry
-
-        await self.telegram.send(
-            f"❌ *Captcha failed after {max_attempts} attempts.*\n"
-            "Booking aborted. Will retry on the next scheduled cycle."
-        )
-        return False
+        raise CaptchaSolveError(
+            f"Gemini failed to solve the captcha after {max_attempts} attempts."
+        ) from last_error
