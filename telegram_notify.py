@@ -33,6 +33,9 @@ class TelegramNotifier:
 
     async def send_photo(self, image_bytes: bytes, caption: str = "") -> bool:
         """Send an image file for error diagnostics."""
+        # Telegram enforces a 1024-character limit on photo captions.
+        if len(caption) > 1024:
+            caption = caption[:1021] + "…"
         try:
             async with aiohttp.ClientSession() as session:
                 form = aiohttp.FormData()
