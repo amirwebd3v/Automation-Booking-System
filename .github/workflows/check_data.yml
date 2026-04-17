@@ -28,6 +28,14 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
+      - name: Restore browser session state
+        uses: actions/cache/restore@v4
+        with:
+          path: storage_state.json
+          key: ${{ runner.os }}-sim24-storage-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-sim24-storage-
+
       # ── Install Python dependencies ──────────────────────────────────────
       - name: Install dependencies
         run: |
@@ -55,7 +63,15 @@ jobs:
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           SIM24_USERNAME:     ${{ secrets.SIM24_USERNAME }}
           SIM24_PASSWORD:     ${{ secrets.SIM24_PASSWORD }}
+          GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
           GITHUB_GIST_TOKEN:  ${{ secrets.GIST_TOKEN }}
           GITHUB_GIST_ID:     ${{ secrets.GIST_ID }}
         run: |
           python main.py
+
+      - name: Save browser session state
+        if: ${{ always() && hashFiles('storage_state.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: storage_state.json
+          key: ${{ runner.os }}-sim24-storage-${{ github.run_id }}
