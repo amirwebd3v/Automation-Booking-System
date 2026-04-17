@@ -56,6 +56,10 @@ async def test_full_workflow_books_when_below_threshold(monkeypatch):
             state["messages"].append(text)
             return True
 
+        async def send_photo(self, image_bytes, caption=""):
+            state["messages"].append(caption)
+            return True
+
     class FakeLogin:
         def __init__(self, username, password, telegram):
             assert username == "user"
@@ -94,8 +98,8 @@ async def test_full_workflow_books_when_below_threshold(monkeypatch):
     assert state["booking_called"] is True
     assert state["updated"] is True
     assert state["browser"] is not None and state["browser"].closed is True
-    assert any("Data Usage Report" in msg for msg in state["messages"])
-    assert any("booked successfully" in msg for msg in state["messages"])
+    assert any("Run complete" in msg for msg in state["messages"])
+    assert any("2 GB packet booked successfully" in msg for msg in state["messages"])
 
 
 @pytest.mark.asyncio
@@ -127,6 +131,10 @@ async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
 
         async def send(self, text):
             state["messages"].append(text)
+            return True
+
+        async def send_photo(self, image_bytes, caption=""):
+            state["messages"].append(caption)
             return True
 
     class FakeLogin:
@@ -162,6 +170,7 @@ async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
 
     assert state["booking_constructed"] is False
     assert state["updated"] is True
+    assert any("Run complete" in msg for msg in state["messages"])
     assert any("No action needed" in msg for msg in state["messages"])
 
 
@@ -193,6 +202,10 @@ async def test_full_workflow_reports_login_failure(monkeypatch):
 
         async def send(self, text):
             state["messages"].append(text)
+            return True
+
+        async def send_photo(self, image_bytes, caption=""):
+            state["messages"].append(caption)
             return True
 
     class FakeLogin:
