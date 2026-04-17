@@ -64,6 +64,7 @@ async def main():
 
     browser = None
     page = None
+    login_module = None
     try:
         login_module = Sim24Login(
             username=config.sim24_username,
@@ -124,6 +125,12 @@ async def main():
         config.update_last_run()
         if browser:
             await browser.close()
+        pw = getattr(login_module, "_playwright", None)
+        if pw is not None:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

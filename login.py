@@ -33,6 +33,7 @@ class Sim24Login:
         self.username = username
         self.password = password
         self.telegram = telegram
+        self._playwright = None  # stored so the caller can stop it after browser.close()
 
     async def login(self) -> Tuple[Optional[object], Optional[Page]]:
         """
@@ -43,6 +44,7 @@ class Sim24Login:
         from captcha_handler import CaptchaHandler
 
         playwright = await async_playwright().start()
+        self._playwright = playwright
 
         # ── Browser selection ─────────────────────────────────────────────
         # USE_EDGE=true in .env → uses your installed Microsoft Edge

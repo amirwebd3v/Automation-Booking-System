@@ -36,7 +36,7 @@ class DataChecker:
 
                 if used_kb and total_kb:
                     print(f"[DATA] ARIA method — used: {used_kb} KB, total: {total_kb} KB")
-                    return int(used_kb), int(total_kb)
+                    return int(float(used_kb)), int(float(total_kb))
         except Exception as e:
             print(f"[DATA] ARIA method failed: {e}")
 

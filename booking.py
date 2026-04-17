@@ -57,6 +57,11 @@ class BookingModule:
         button, selector_used = await self._find_booking_button()
         if button is None:
             self._log("[BOOKING] ❌ Book button not found.")
+            await self._report_state(
+                "❌ *Booking button not found.*\n"
+                "No bookable 2 GB packet button was visible on the page. "
+                "The page structure may have changed or the service may be unavailable."
+            )
             return False
 
         self._log(f"[BOOKING] ✅ Booking button found via: `{selector_used}`")
@@ -149,6 +154,12 @@ class BookingModule:
         # Fail fast if nothing was clicked.
         if not clicked:
             self._log("[BOOKING] ❌ All click methods failed.")
+            await self._report_state(
+                "❌ *Could not click the booking button.*\n"
+                "The button was found but no click method succeeded "
+                "(standard, force, and JS clicks all failed).\n\n"
+                f"Trace:\n{self._trace_text()}"
+            )
             return False
 
         self._log(f"[BOOKING] ✅ Book button clicked via {click_method}.")
@@ -351,28 +362,28 @@ class BookingModule:
         return False
 
     async def _wait_for_loading(self, timeout_seconds: int = 30) -> None:
-                timeout_ms = timeout_seconds * 1000
-                self._log("[BOOKING] ⏳ Waiting for loading indicators to clear...")
+        timeout_ms = timeout_seconds * 1000
+        self._log("[BOOKING] ⏳ Waiting for loading indicators to clear...")
 
-                for selector in SPINNER_SELECTORS:
-                        locator = self.page.locator(selector).first
-                        try:
-                                if await locator.count() and await locator.is_visible():
-                                        await self.page.wait_for_selector(selector, state="hidden", timeout=timeout_ms)
-                        except Exception:
-                                continue
+        for selector in SPINNER_SELECTORS:
+            locator = self.page.locator(selector).first
+            try:
+                if await locator.count() and await locator.is_visible():
+                    await self.page.wait_for_selector(selector, state="hidden", timeout=timeout_ms)
+            except Exception:
+                continue
 
-                try:
-                        loading_text = self.page.get_by_text("Wird geladen")
-                        if await loading_text.first.count() and await loading_text.first.is_visible():
-                                await loading_text.first.wait_for(state="hidden", timeout=timeout_ms)
-                except Exception:
-                        pass
+        try:
+            loading_text = self.page.get_by_text("Wird geladen")
+            if await loading_text.first.count() and await loading_text.first.is_visible():
+                await loading_text.first.wait_for(state="hidden", timeout=timeout_ms)
+        except Exception:
+            pass
 
-                try:
-                        await self.page.wait_for_load_state("networkidle", timeout=5_000)
-                except Exception:
-                        pass
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=5_000)
+        except Exception:
+            pass
 
     async def _verify_success(self) -> bool:
         # Wait for any loading spinner to clear before inspecting the page.
