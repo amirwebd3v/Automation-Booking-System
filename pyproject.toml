@@ -27,6 +27,10 @@ pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
 asyncio_mode = "auto"
+markers = [
+  "live: exercises real external services such as Telegram and sim24",
+  "destructive: may trigger a real booking and should only run with explicit opt-in",
+]
 
 [tool.ruff]
 line-length = 100

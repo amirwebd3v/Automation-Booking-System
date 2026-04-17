@@ -1,9 +1,5 @@
-"""
-sim24 Auto Data Booker — Main Entry Point
-Runs on GitHub Actions every 30 minutes (controlled by the cron schedule).
-"""
+"""sim24 Auto Data Booker main entry point."""
 
-import sys
 import time
 import asyncio
 from config_manager import ConfigManager
@@ -12,6 +8,40 @@ from login import Sim24Login
 from data_checker import DataChecker
 from decision_engine import DecisionEngine
 from booking import BookingModule
+from captcha_handler import CaptchaSolveError
+
+
+def _build_run_summary(
+    remaining_gb: float,
+    total_gb: float,
+    should_book: bool,
+    booking_success: bool | None,
+) -> str:
+    if not should_book:
+        action = "No action needed."
+    elif booking_success:
+        action = "2 GB packet booked successfully."
+    else:
+        action = "Booking attempt did not confirm success."
+
+    return (
+        "✅ *Run complete.*\n"
+        f"Remaining data: `{remaining_gb:.2f} GB` of `{total_gb:.2f} GB`\n"
+        f"Action: {action}"
+    )
+
+
+async def _send_error_alert(telegram: TelegramNotifier, message: str, page=None) -> None:
+    screenshot_sent = False
+    if page is not None:
+        try:
+            screenshot = await page.screenshot(full_page=True)
+            screenshot_sent = await telegram.send_photo(screenshot, caption=message)
+        except Exception as exc:
+            print(f"[ERROR] Failed to capture/send screenshot: {exc}")
+
+    if not screenshot_sent:
+        await telegram.send(message)
 
 
 async def main():
@@ -31,29 +61,26 @@ async def main():
         return
 
     browser = None
+    page = None
     try:
-        # ── Step 1: Login ────────────────────────────────────────────────────
         login_module = Sim24Login(
             username=config.sim24_username,
             password=config.sim24_password,
-            telegram=telegram          # ← needed for captcha on login page
+            telegram=telegram,
         )
         browser, page = await login_module.login()
 
         if page is None:
             await telegram.send("❌ *Login failed.* Check credentials or site availability.")
-            config.update_last_run()
             return
 
         print("[LOGIN] Success.")
 
-        # ── Step 2: Check Data Volume ────────────────────────────────────────
         checker = DataChecker(page)
         used_kb, total_kb = await checker.get_usage()
 
         if used_kb is None:
             await telegram.send("❌ *Could not read data usage.* Page structure may have changed.")
-            config.update_last_run()
             return
 
         used_gb  = used_kb  / (1024 * 1024)
@@ -62,38 +89,36 @@ async def main():
 
         print(f"[DATA] Used: {used_gb:.2f} GB / {total_gb:.2f} GB | Remaining: {remaining_gb:.2f} GB")
 
-        # ── Step 3: Decision Engine ──────────────────────────────────────────
         engine = DecisionEngine(threshold_gb=0.5)
         should_book = engine.should_book(remaining_gb)
-
-        status_msg = (
-            f"📊 *Data Usage Report*\n"
-            f"Used: `{used_gb:.2f} GB` / `{total_gb:.2f} GB`\n"
-            f"Remaining: `{remaining_gb:.2f} GB`\n"
-            f"Threshold: `{engine.threshold_gb} GB`\n"
-            f"Action: {'🟡 Booking triggered...' if should_book else '✅ No action needed'}"
-        )
-        await telegram.send(status_msg)
-
-        # ── Step 4: Book if needed ───────────────────────────────────────────
+        booking_success = None
         if should_book:
             booker = BookingModule(page, telegram)
-            success = await booker.book_2gb_packet()
+            booking_success = await booker.book_2gb_packet()
 
-            if success:
-                await telegram.send("✅ *2 GB packet booked successfully!*")
-            else:
-                await telegram.send("❌ *Booking failed.* Manual action may be required.")
+        await telegram.send(
+            _build_run_summary(
+                remaining_gb=remaining_gb,
+                total_gb=total_gb,
+                should_book=should_book,
+                booking_success=booking_success,
+            )
+        )
 
-        config.update_last_run()
-
+    except CaptchaSolveError as e:
+        print(f"[CAPTCHA] {e}")
+        await _send_error_alert(
+            telegram,
+            f"❌ *Gemini failed to solve the CAPTCHA after 3 attempts.*\n`{str(e)}`",
+            page,
+        )
     except Exception as e:
         error_msg = f"💥 *Unexpected error:*\n`{str(e)}`"
         print(f"[ERROR] {e}")
-        await telegram.send(error_msg)
-        config.update_last_run()
+        await _send_error_alert(telegram, error_msg, page)
 
     finally:
+        config.update_last_run()
         if browser:
             await browser.close()
 

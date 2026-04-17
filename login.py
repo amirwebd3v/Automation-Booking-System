@@ -1,31 +1,28 @@
-"""
-Sim24 Login Module
-──────────────────
-Handles a fresh login every run cycle (no session persistence needed
-because the site times out after 10 minutes anyway).
-
-Login flow:
-  1. Navigate to the login page
-  2. Fill username + password
-  3. Check for captcha BEFORE submitting (Flow A — captcha on page load)
-  4. Submit the form
-  5. Check for captcha AFTER submitting (Flow B — captcha appears post-submit)
-  6. Verify login success by checking for post-login URL or element
-
-Both Flow A and Flow B are handled via the same CaptchaHandler (Telegram photo → user reply).
-The TelegramNotifier is passed in from main.py so it's shared across all modules.
-"""
+"""Sim24 login flow with storage-state reuse and CAPTCHA fallback."""
 
 import os
 import asyncio
-from playwright.async_api import async_playwright, Browser, Page
+from pathlib import Path
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from typing import Tuple, Optional
 
-# CaptchaHandler is imported here — it needs the page and telegram notifier
-# We import lazily inside the method to avoid circular imports at module load
+try:
+    from playwright_stealth import stealth_async
+except ImportError:
+    async def stealth_async(page: Page) -> None:
+        return None
+
 LOGIN_URL   = "https://service.sim24.de/"
 SUCCESS_URL = "https://service.sim24.de/mytariff"
 DATA_URL    = "https://service.sim24.de/mytariff/invoice/showGprsDataUsage"
+LOGIN_FORM_SELECTOR = "#UserLoginType_alias"
+DASHBOARD_READY_SELECTORS = [
+        "a[href*='/logout']",
+        "a[href*='/mytariff']",
+        "body",
+]
+STORAGE_STATE_PATH = Path(__file__).resolve().with_name("storage_state.json")
+CAPTCHA_MAX_ATTEMPTS = 3
 
 # Max login attempts (in case captcha is wrong or session quirk)
 MAX_LOGIN_ATTEMPTS = 2
@@ -35,7 +32,7 @@ class Sim24Login:
     def __init__(self, username: str, password: str, telegram=None):
         self.username = username
         self.password = password
-        self.telegram = telegram  # TelegramNotifier instance (optional but needed for captcha)
+        self.telegram = telegram
 
     async def login(self) -> Tuple[Optional[object], Optional[Page]]:
         """
@@ -43,7 +40,6 @@ class Sim24Login:
         Returns (None, None) on failure.
         Caller is responsible for calling browser.close() when done.
         """
-        # Import here to avoid circular dependency (CaptchaHandler also imports TelegramNotifier)
         from captcha_handler import CaptchaHandler
 
         playwright = await async_playwright().start()
@@ -73,112 +69,96 @@ class Sim24Login:
                 ]
             )
 
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 900},
-            locale="de-DE",
-        )
-
-        page = await context.new_page()
+        context = await self._create_context(browser, use_storage_state=STORAGE_STATE_PATH.exists())
+        page = await self._new_stealth_page(context)
         captcha = CaptchaHandler(page, self.telegram)
 
-        for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
-            print(f"[LOGIN] Attempt {attempt}/{MAX_LOGIN_ATTEMPTS}")
+        session_reused = False
 
-            try:
-                # ── Navigate to login page ────────────────────────────────────
-                print(f"[LOGIN] Navigating to {LOGIN_URL}")
-                await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
-                await page.wait_for_selector("#UserLoginType_alias", timeout=10_000)
+        if STORAGE_STATE_PATH.exists():
+            print(f"[LOGIN] Found stored session: {STORAGE_STATE_PATH}")
+            session_reused = await self._load_existing_session(page)
+            if not session_reused:
+                print("[LOGIN] Stored session is stale; falling back to credential login.")
+                await context.close()
+                context = await self._create_context(browser, use_storage_state=False)
+                page = await self._new_stealth_page(context)
+                captcha = CaptchaHandler(page, self.telegram)
 
-                # ── Flow A: Check for captcha BEFORE filling the form ─────────
-                # Some portals show captcha immediately on page load
-                if await captcha.is_captcha_present():
-                    print("[LOGIN] Captcha detected on page load (Flow A).")
-                    solved = await self._handle_login_captcha(captcha, page)
-                    if not solved:
-                        await browser.close()
-                        return None, None
+        if not session_reused:
+            for attempt in range(1, MAX_LOGIN_ATTEMPTS + 1):
+                print(f"[LOGIN] Attempt {attempt}/{MAX_LOGIN_ATTEMPTS}")
 
-                # ── Fill credentials ──────────────────────────────────────────
-                await page.fill("#UserLoginType_alias",    self.username)
-                await page.fill("#UserLoginType_password", self.password)
+                try:
+                    print(f"[LOGIN] Navigating to {LOGIN_URL}")
+                    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30_000)
+                    await page.wait_for_selector(LOGIN_FORM_SELECTOR, timeout=10_000)
 
-                # Small human-like delay
-                await asyncio.sleep(0.8)
+                    if await captcha.is_captcha_present():
+                        print("[LOGIN] Captcha detected on page load (Flow A).")
+                        solved = await self._handle_login_captcha(captcha)
+                        if not solved:
+                            await browser.close()
+                            return None, None
 
-                # ── Submit form ───────────────────────────────────────────────
-                # Try multiple selectors first; fall back to direct JS call
-                submit_clicked = await self._click_submit(page)
-                if not submit_clicked:
-                    print("[LOGIN] No submit button matched any selector — trying JS submitForm()")
-                    try:
-                        await page.evaluate("submitForm('loginAction')")
-                    except Exception:
-                        # Last resort: press Enter on the password field
-                        print("[LOGIN] JS submitForm failed — pressing Enter on password field")
-                        await page.press("#UserLoginType_password", "Enter")
+                    await page.fill(LOGIN_FORM_SELECTOR, self.username)
+                    await page.fill("#UserLoginType_password", self.password)
 
-                # ── Wait briefly then check what happened ─────────────────────
-                await asyncio.sleep(2)
+                    await asyncio.sleep(0.8)
 
-                # ── Flow B: Check for captcha AFTER submit ────────────────────
-                # Some portals only show captcha after a login attempt
-                if await captcha.is_captcha_present():
-                    print("[LOGIN] Captcha detected after submit (Flow B).")
-                    solved = await self._handle_login_captcha(captcha, page)
-                    if not solved:
-                        await browser.close()
-                        return None, None
-
-                    # Re-submit after solving the captcha
-                    print("[LOGIN] Re-submitting form after captcha solve...")
                     submit_clicked = await self._click_submit(page)
                     if not submit_clicked:
-                        # Last resort: submit the form directly
-                        await page.evaluate("submitForm('loginAction')")
+                        print("[LOGIN] No submit button matched any selector — trying JS submitForm()")
+                        try:
+                            await page.evaluate("submitForm('loginAction')")
+                        except Exception:
+                            print("[LOGIN] JS submitForm failed — pressing Enter on password field")
+                            await page.press("#UserLoginType_password", "Enter")
+
                     await asyncio.sleep(2)
 
-                # ── Check login result ────────────────────────────────────────
-                current_url = page.url
+                    if await captcha.is_captcha_present():
+                        print("[LOGIN] Captcha detected after submit (Flow B).")
+                        solved = await self._handle_login_captcha(captcha)
+                        if not solved:
+                            await browser.close()
+                            return None, None
 
-                if SUCCESS_URL in current_url:
-                    print(f"[LOGIN] ✅ Login successful. URL: {current_url}")
-                    break  # Exit the retry loop
-
-                # Still on login page — check why
-                if "login" in current_url.lower():
-                    error_text = await self._get_login_error(page)
-                    if error_text:
-                        print(f"[LOGIN] Login error on page: {error_text}")
-
-                    if attempt < MAX_LOGIN_ATTEMPTS:
-                        print(f"[LOGIN] Retrying... ({attempt}/{MAX_LOGIN_ATTEMPTS})")
+                        print("[LOGIN] Re-submitting form after captcha solve...")
+                        submit_clicked = await self._click_submit(page)
+                        if not submit_clicked:
+                            await page.evaluate("submitForm('loginAction')")
                         await asyncio.sleep(2)
-                        continue
-                    else:
+
+                    current_url = page.url
+
+                    if SUCCESS_URL in current_url:
+                        print(f"[LOGIN] ✅ Login successful. URL: {current_url}")
+                        await context.storage_state(path=str(STORAGE_STATE_PATH))
+                        print(f"[LOGIN] Saved session state to {STORAGE_STATE_PATH}")
+                        break
+
+                    if "login" in current_url.lower():
+                        error_text = await self._get_login_error(page)
+                        if error_text:
+                            print(f"[LOGIN] Login error on page: {error_text}")
+
+                        if attempt < MAX_LOGIN_ATTEMPTS:
+                            print(f"[LOGIN] Retrying... ({attempt}/{MAX_LOGIN_ATTEMPTS})")
+                            await asyncio.sleep(2)
+                            continue
+
                         print("[LOGIN] All attempts failed.")
-                        if self.telegram:
-                            await self.telegram.send(
-                                "❌ *Login failed after all attempts.*\n"
-                                f"Last error: `{error_text or 'Unknown error'}`\n"
-                                "Please check your credentials."
-                            )
                         await browser.close()
                         return None, None
 
-            except Exception as e:
-                print(f"[LOGIN] Exception on attempt {attempt}: {e}")
-                if attempt >= MAX_LOGIN_ATTEMPTS:
-                    await browser.close()
-                    return None, None
-                await asyncio.sleep(2)
+                except Exception as e:
+                    print(f"[LOGIN] Exception on attempt {attempt}: {e}")
+                    if attempt >= MAX_LOGIN_ATTEMPTS:
+                        await browser.close()
+                        return None, None
+                    await asyncio.sleep(2)
 
-        # ── Navigate to data usage page ───────────────────────────────────────
         try:
             print("[LOGIN] Navigating to data usage page...")
             await page.goto(DATA_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -191,37 +171,73 @@ class Sim24Login:
             await browser.close()
             return None, None
 
+    async def _create_context(self, browser: Browser, use_storage_state: bool) -> BrowserContext:
+        context_options = {
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "viewport": {"width": 1280, "height": 900},
+            "locale": "de-DE",
+        }
+        if use_storage_state:
+            context_options["storage_state"] = str(STORAGE_STATE_PATH)
+        return await browser.new_context(**context_options)
+
+    async def _new_stealth_page(self, context: BrowserContext) -> Page:
+        page = await context.new_page()
+        await stealth_async(page)
+        return page
+
+    async def _load_existing_session(self, page: Page) -> bool:
+        print(f"[LOGIN] Trying stored session via {SUCCESS_URL}")
+        await page.goto(SUCCESS_URL, wait_until="domcontentloaded", timeout=30_000)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=5_000)
+        except Exception:
+            pass
+
+        current_url = page.url.lower()
+        if "login" in current_url:
+            return False
+
+        if SUCCESS_URL in page.url:
+            for selector in DASHBOARD_READY_SELECTORS:
+                try:
+                    await page.wait_for_selector(selector, timeout=5_000)
+                    print("[LOGIN] Stored session accepted by dashboard.")
+                    return True
+                except Exception:
+                    continue
+
+        return False
+
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    async def _handle_login_captcha(self, captcha, page) -> bool:
-        """
-        Sends captcha image to Telegram, waits for user reply,
-        enters the solution into the captcha field.
-        Returns True if solution was entered, False on timeout or failure.
-        """
-        if self.telegram:
-            await self.telegram.send(
-                "🔐 *Captcha on Login Page*\n"
-                "The login form requires a captcha.\n"
-                "Sending image now..."
-            )
+    async def _handle_login_captcha(self, captcha) -> bool:
+        from captcha_handler import CaptchaAutomationError, CaptchaSolveError
 
-        solution = await captcha.solve()
-        if solution is None:
-            # solve() already sent the timeout notification
-            return False
+        last_error = None
 
-        entered = await captcha.enter_solution(solution)
-        if not entered:
-            if self.telegram:
-                await self.telegram.send(
-                    "❌ *Could not enter captcha solution on login page.*\n"
-                    "The captcha input field was not found."
-                )
-            return False
+        for attempt in range(1, CAPTCHA_MAX_ATTEMPTS + 1):
+            if attempt > 1:
+                await captcha.reload_captcha_image()
 
-        print(f"[LOGIN] Captcha solution entered: {solution}")
-        return True
+            try:
+                solution = await captcha.solve()
+                if solution is None:
+                    raise CaptchaAutomationError("Login captcha was not available for solving.")
+
+                print(f"[LOGIN] Captcha solution entered: {solution}")
+                return True
+            except CaptchaAutomationError as exc:
+                last_error = exc
+                print(f"[LOGIN] Captcha attempt {attempt} failed: {exc}")
+
+        raise CaptchaSolveError(
+            f"Gemini failed to solve the login captcha after {CAPTCHA_MAX_ATTEMPTS} attempts."
+        ) from last_error
 
     async def _click_submit(self, page: Page) -> bool:
         """Try various ways to click the login submit button."""
