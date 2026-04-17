@@ -61,24 +61,18 @@ class BookingModule:
 
         self._log(f"[BOOKING] ✅ Booking button found via: `{selector_used}`")
 
-        # Remove disabled state if present.
+        # Detect and report disabled state — do NOT attempt to override it.
         is_disabled   = await button.get_attribute("disabled")
         aria_disabled = await button.get_attribute("aria-disabled")
         if is_disabled is not None or str(aria_disabled).lower() == "true":
-            self._log("[BOOKING] ⚠️ Button disabled — applying JS override...")
-            await self.page.evaluate(
-                """
-                () => {
-                  for (const el of document.querySelectorAll(
-                    "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-'], a[title='Buchen']"
-                  )) {
-                    el.removeAttribute('disabled');
-                    el.setAttribute('aria-disabled', 'false');
-                    el.classList && el.classList.remove('disabled');
-                  }
-                }
-                """
+            self._log("[BOOKING] ❌ Booking button is disabled — reporting and stopping.")
+            await self._report_state(
+                "⚠️ *Booking button is disabled.*\n"
+                "The 2 GB packet button was found but is currently disabled. "
+                "This may mean the service is temporarily unavailable, already active, "
+                "or a payment issue exists. No booking was attempted."
             )
+            return False
 
         # ── Steps 2–3: Click Buchen while capturing getChangeServiceInfo ───
         # expect_response must wrap the click so the listener is active when
@@ -381,70 +375,95 @@ class BookingModule:
                         pass
 
     async def _verify_success(self) -> bool:
-        # Wait for any loading spinner to clear before inspecting page content.
+        # Wait for any loading spinner to clear before inspecting the page.
         await self._wait_for_loading()
 
-        # Poll for up to 15 s so the success/failure dialog has time to render
-        # (it often arrives a moment after the spinner disappears).
-        POLL_INTERVAL = 1.0   # seconds between checks
-        POLL_TIMEOUT  = 15.0  # total seconds before giving up
+        # Poll up to 20 s for the success modal to appear.
+        POLL_INTERVAL = 1.5   # seconds between checks
+        POLL_TIMEOUT  = 20.0  # total seconds before giving up
         deadline = asyncio.get_event_loop().time() + POLL_TIMEOUT
 
         while True:
+            # ── Only accept a visible modal that has success text AND a close button ──
+            if await self._has_success_modal_with_close_button():
+                self._log("[BOOKING] ✅ Success modal with close button confirmed.")
+                return True
+
+            # ── Definitive failure keywords — stop polling immediately ─────────────
             try:
-                current_url   = self.page.url
                 content_lower = (await self.page.content()).lower()
-                self._log(f"[BOOKING] Verifying at URL: `{current_url}`")
-
-                # ── Success signals ────────────────────────────────────────
-                if await self._has_processing_success_dialog(content_lower):
-                    self._log("[BOOKING] ✅ Success modal detected: order is being processed.")
-                    return True
-
-                for kw in ["erfolgreich", "gebucht", "buchung bestaetigt",
-                           "buchung bestätigt", "bestellung erfolgreich", "successfully"]:
-                    if kw in content_lower:
-                        self._log(f"[BOOKING] ✅ Success keyword: `{kw}`")
-                        return True
-
-                if "success" in current_url.lower() or "bestaetigung" in current_url.lower():
-                    self._log("[BOOKING] ✅ Success URL detected.")
-                    return True
-
-                # ── Definitive failure signals — stop polling immediately ──
                 for kw in ["fehlgeschlagen", "nicht moeglich", "nicht möglich",
                            "ungueltig", "ungültig", "ein fehler ist aufgetreten"]:
                     if kw in content_lower:
-                        self._log(f"[BOOKING] ❌ Failure keyword: `{kw}`")
+                        self._log(f"[BOOKING] ❌ Failure keyword detected: `{kw}`")
+                        await self._report_state(
+                            f"❌ *Booking failed.*\n"
+                            f"Failure indicator detected: `{kw}`\n\n"
+                            f"Booking trace:\n{self._trace_text()}"
+                        )
                         return False
-
             except Exception as e:
                 self._log(f"[BOOKING] ❌ Verification error: {type(e).__name__}: {e}")
 
             if asyncio.get_event_loop().time() >= deadline:
                 break
 
-            self._log(f"[BOOKING] ⏳ Outcome not yet clear — polling again...")
+            self._log("[BOOKING] ⏳ Waiting for success modal...")
             await asyncio.sleep(POLL_INTERVAL)
 
-        self._log("[BOOKING] ❌ Outcome unclear after polling.")
+        # No success modal appeared after the full timeout — report the actual page state.
+        self._log("[BOOKING] ❌ Success modal did not appear — booking outcome unconfirmed.")
+        try:
+            current_url = self.page.url
+            await self._report_state(
+                f"⚠️ *Booking outcome unconfirmed.*\n"
+                f"The success confirmation modal did not appear after the booking attempt.\n"
+                f"Current URL: `{current_url}`\n\n"
+                f"Booking trace:\n{self._trace_text()}"
+            )
+        except Exception:
+            await self.telegram.send(
+                f"⚠️ *Booking outcome unconfirmed.*\n"
+                f"The success modal did not appear.\n\n"
+                f"Booking trace:\n{self._trace_text()}"
+            )
         return False
 
-    async def _has_processing_success_dialog(self, content_lower: str) -> bool:
-        # Fast path: the success phrase is unique — no other page element contains it.
-        if "dein auftrag ist in bearbeitung" in content_lower:
-            return True
+    async def _report_state(self, message: str) -> None:
+        """Take a screenshot and send it with a descriptive message to Telegram."""
+        try:
+            screenshot = await self.page.screenshot(full_page=True)
+            sent = await self.telegram.send_photo(screenshot, caption=message)
+            if not sent:
+                await self.telegram.send(message)
+        except Exception as e:
+            print(f"[BOOKING] Failed to capture/send screenshot: {e}")
+            try:
+                await self.telegram.send(message)
+            except Exception:
+                pass
 
-        # Robust path: search ANY visible dialog/modal/overlay in the DOM
-        # for the success message, independent of element id or class name.
+    async def _has_success_modal_with_close_button(self) -> bool:
+        """
+        Returns True ONLY when a visible modal/dialog is present that:
+          1. Contains a booking-success phrase, AND
+          2. Has a close/dismiss button inside it.
+        This is the sole criterion for a confirmed successful booking.
+        """
+        SUCCESS_PHRASES = [
+            "dein auftrag ist in bearbeitung",
+            "datenvolumen gebucht",
+            "erfolgreich gebucht",
+            "buchung erfolgreich",
+            "buchung bestätigt",
+            "buchung bestaetigt",
+            "bestellung erfolgreich",
+            "datenvolumen erfolgreich",
+        ]
         try:
             return await self.page.evaluate(
                 """
-                () => {
-                  const SUCCESS_TEXT = 'dein auftrag ist in bearbeitung';
-                  const HEADLINE_TEXT = 'information';
-
-                  // Helper: is an element actually visible to the user?
+                (successPhrases) => {
                   function isVisible(el) {
                     if (!el) return false;
                     const r = el.getBoundingClientRect();
@@ -452,58 +471,64 @@ class BookingModule:
                     const s = window.getComputedStyle(el);
                     return s.display !== 'none'
                         && s.visibility !== 'hidden'
-                        && s.opacity !== '0';
+                        && parseFloat(s.opacity) > 0;
                   }
 
-                  // 1. Check the known captcha/booking overlay dialog.
-                  const knownDialog = document.querySelector('dialog#c-overlay[open]');
-                  if (knownDialog && isVisible(knownDialog)) {
-                    const text = knownDialog.textContent.toLowerCase();
-                    if (text.includes(SUCCESS_TEXT)) return true;
-                  }
-
-                  // 2. Check ALL open <dialog> elements.
-                  for (const dlg of document.querySelectorAll('dialog[open]')) {
-                    if (!isVisible(dlg)) continue;
-                    const text = dlg.textContent.toLowerCase();
-                    if (text.includes(SUCCESS_TEXT)) return true;
-                  }
-
-                  // 3. Check common modal/overlay containers (non-dialog elements).
-                  const modalSelectors = [
-                    '[role="dialog"]',
-                    '[role="alertdialog"]',
-                    '.modal',
-                    '.overlay',
-                    '[class*="c-overlay"]',
-                    '[class*="modal"]',
-                  ];
-                  for (const sel of modalSelectors) {
-                    for (const el of document.querySelectorAll(sel)) {
-                      if (!isVisible(el)) continue;
-                      const text = el.textContent.toLowerCase();
-                      if (text.includes(SUCCESS_TEXT)) return true;
+                  function hasCloseButton(el) {
+                    const CLOSE_LABELS = ['schließen', 'ok', 'close', 'bestätigen', 'weiter', '×', 'x'];
+                    // Explicit close selectors first
+                    for (const sel of [
+                      '[data-dismiss]', '.close', '.btn-close',
+                      '[aria-label="Close"]', '[aria-label="Schließen"]',
+                      'button[type="button"]',
+                    ]) {
+                      try {
+                        const btn = el.querySelector(sel);
+                        if (btn && isVisible(btn)) return true;
+                      } catch (e) {}
                     }
+                    // Any visible button/link whose text matches a close label
+                    for (const btn of el.querySelectorAll('button, a[role="button"], a.btn')) {
+                      if (!isVisible(btn)) continue;
+                      const txt = btn.textContent.toLowerCase().trim();
+                      if (CLOSE_LABELS.some(l => txt === l || txt.includes(l))) return true;
+                    }
+                    return false;
                   }
 
-                  // 4. Last resort: any visible element with both the headline
-                  //    and success text, accompanied by a 'Schließen' button.
-                  const allEls = document.querySelectorAll('div, section, aside, article');
-                  for (const el of allEls) {
-                    if (!isVisible(el)) continue;
+                  function hasSuccessText(el) {
                     const text = el.textContent.toLowerCase();
-                    if (text.includes(HEADLINE_TEXT)
-                        && text.includes(SUCCESS_TEXT)
-                        && text.includes('schließen')) {
-                      return true;
+                    return successPhrases.some(p => text.includes(p));
+                  }
+
+                  // 1. Open <dialog> elements
+                  for (const dlg of document.querySelectorAll('dialog[open]')) {
+                    if (isVisible(dlg) && hasSuccessText(dlg) && hasCloseButton(dlg)) return true;
+                  }
+
+                  // 2. Known sim24 overlay
+                  const overlay = document.querySelector('div.c-overlay-content');
+                  if (overlay && isVisible(overlay) && hasSuccessText(overlay) && hasCloseButton(overlay)) return true;
+
+                  // 3. Bootstrap-style modals and ARIA dialogs
+                  for (const sel of [
+                    '.modal.show',
+                    '.modal[style*="display: block"]',
+                    '[role="dialog"]:not([aria-hidden="true"])',
+                    '[role="alertdialog"]',
+                    '[class*="c-overlay"]',
+                  ]) {
+                    for (const el of document.querySelectorAll(sel)) {
+                      if (isVisible(el) && hasSuccessText(el) && hasCloseButton(el)) return true;
                     }
                   }
 
                   return false;
                 }
-                """
+                """,
+                SUCCESS_PHRASES,
             )
         except Exception as e:
-            self._log(f"[BOOKING] Dialog-check skipped ({type(e).__name__}).")
+            self._log(f"[BOOKING] Success-modal check skipped ({type(e).__name__}).")
             return False
 

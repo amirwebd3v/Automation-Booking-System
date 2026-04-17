@@ -8,7 +8,7 @@ from typing import Tuple, Optional
 
 try:
     from playwright_stealth import stealth_async
-except ImportError:
+except Exception:
     async def stealth_async(page: Page) -> None:
         return None
 
