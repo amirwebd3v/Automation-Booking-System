@@ -221,6 +221,8 @@ async def test_live_full_workflow_destructive(monkeypatch, tmp_path):
     if os.environ.get("RUN_LIVE_BOOKING_TESTS") != "1":
         pytest.skip("Set RUN_LIVE_BOOKING_TESTS=1 to allow a real booking test.")
 
+    force_booking = os.environ.get("SIM24_FORCE_BOOKING_TEST") == "1"
+
     env = _require_env(
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHAT_ID",
@@ -256,18 +258,28 @@ async def test_live_full_workflow_destructive(monkeypatch, tmp_path):
             sent_messages.append(caption)
             return await super().send_photo(image_bytes, caption)
 
+    class ForceBookingDecisionEngine:
+        def __init__(self, threshold_gb=0.5):
+            self.threshold_gb = threshold_gb
+
+        def should_book(self, remaining_gb):
+            if force_booking:
+                return True
+            return remaining_gb < self.threshold_gb
+
     original_get_usage = DataChecker.get_usage
 
     async def guarded_get_usage(self):
         used_kb, total_kb = await original_get_usage(self)
         assert used_kb is not None and total_kb is not None
         remaining_gb = (total_kb - used_kb) / (1024 * 1024)
-        if remaining_gb >= 0.5 and os.environ.get("SIM24_FORCE_BOOKING_TEST") != "1":
+        if remaining_gb >= 0.5 and not force_booking:
             pytest.skip("Remaining data is above threshold; refusing a real booking test.")
         return used_kb, total_kb
 
     monkeypatch.setattr(workflow_main, "ConfigManager", LiveConfig)
     monkeypatch.setattr(workflow_main, "TelegramNotifier", RecordingTelegramNotifier)
+    monkeypatch.setattr(workflow_main, "DecisionEngine", ForceBookingDecisionEngine)
     monkeypatch.setattr(workflow_main, "Sim24Login", Sim24Login)
     monkeypatch.setattr(workflow_main, "DataChecker", DataChecker)
     monkeypatch.setattr(workflow_main, "BookingModule", BookingModule)
@@ -275,7 +287,4 @@ async def test_live_full_workflow_destructive(monkeypatch, tmp_path):
 
     await workflow_main.main()
 
-    assert any(
-        "Run complete" in message or "2 GB packet booked successfully" in message
-        for message in sent_messages
-    )
+    assert any("2 GB packet booked successfully" in message for message in sent_messages)
