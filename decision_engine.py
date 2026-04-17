@@ -3,8 +3,8 @@ Decision Engine
 ───────────────
 Simple threshold logic:
   If remaining data < threshold → book
-  
-The threshold is configurable (default 1.5 GB).
+
+The threshold is configurable (default 0.5 GB).
 """
 
 
