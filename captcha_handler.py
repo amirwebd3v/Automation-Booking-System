@@ -50,7 +50,7 @@ CAPTCHA_ERROR_TEXTS = [
     "ungültiger captcha",
 ]
 
-MODAL_SELECTOR = "div.c-overlay-content"
+MODAL_SELECTOR = "dialog#c-overlay"
 SPINNER_SELECTORS = [
     ".loading-overlay",
     ".page-loading",

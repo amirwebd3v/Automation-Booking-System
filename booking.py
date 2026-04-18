@@ -4,8 +4,8 @@ Booking Module
 Handles the 2GB data packet booking flow.
 
 From the HTML analysis:
-  Button ID:    ButtonBuchen-ChangeServiceType-showGprsDataUsage-*
-  Form ID:      BaseForm-ChangeServiceType-showGprsDataUsage-*
+  Button ID:    ButtonBuchen-ChangeServiceType_V5I3-getChangeServiceInfo-*
+  Form ID:      BaseForm-ChangeServiceType_V5I3-getChangeServiceInfo-*
   Service code: V5I3
 
 Flow:
@@ -24,14 +24,15 @@ from captcha_handler import CaptchaHandler, MODAL_SELECTOR, SPINNER_SELECTORS
 
 
 BOOK_BUTTON_SELECTORS = [
-    "[id^='ButtonBuchen-ChangeServiceType-showGprsDataUsage-']",
-    "a[id*='ButtonBuchen'][id*='showGprsDataUsage']",
+    "a[id*='ButtonBuchen'][id*='getChangeServiceInfo']",   # actual live selector
+    "a[id*='ButtonBuchen'][id*='ChangeServiceType']",       # generic variant
+    "a.c-button[title='Buchen']",
     "a[title='Buchen']",
     "button:has-text('Buchen')",
     "a:has-text('Buchen')",
 ]
 
-BOOK_FORM_SELECTOR    = "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
+BOOK_FORM_SELECTOR = "[id*='BaseForm-ChangeServiceType']"
 FALLBACK_ACTIVATE_URL = "/mytariff/invoice/changeService"
 
 
@@ -277,9 +278,14 @@ class BookingModule:
         Parse the getChangeServiceInfo AJAX response to find the Aktivieren
         button's sendPostAndReplaceContent(url, formId) call, then execute it.
         Bypasses shadow DOM entirely — no DOM search needed.
+        Handles both plain quotes and HTML-entity-encoded &quot; quotes.
         """
+        # The onclick attribute in raw AJAX HTML often uses &quot; instead of ".
+        # Pattern handles: '...', "...", and &quot;...&quot;
         m = re.search(
-            r"sendPostAndReplaceContent\s*\(\s*['\"]([^'\"]+)['\"],\s*['\"]([^'\"]+)['\"]",
+            r"sendPostAndReplaceContent(?:QrCode)?\s*\("
+            r"\s*(?:'|\"|\.?&quot;)([^'\"&]+)(?:'|\"|\.?&quot;)"
+            r"\s*,\s*(?:'|\"|\.?&quot;)([^'\"&]+)(?:'|\"|\.?&quot;)",
             html,
         )
         if m:
@@ -299,9 +305,7 @@ class BookingModule:
             """
             ([url, formId]) => {
               if (!formId) {
-                const f = document.querySelector(
-                  "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
-                );
+                const f = document.querySelector("[id*='BaseForm-ChangeServiceType']");
                 if (!f) return 'no-form';
                 formId = f.id;
               }
@@ -311,9 +315,7 @@ class BookingModule:
               }
               // Fallback: set form action and submit.
               const form = document.getElementById(formId)
-                || document.querySelector(
-                     "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
-                   );
+                || document.querySelector("[id*='BaseForm-ChangeServiceType']");
               if (!form) return 'no-form';
               form.action = url;
               form.submit();
@@ -339,9 +341,7 @@ class BookingModule:
         result = await self.page.evaluate(
             """
             (url) => {
-              const form = document.querySelector(
-                "[id^='BaseForm-ChangeServiceType-showGprsDataUsage-']"
-              );
+              const form = document.querySelector("[id*='BaseForm-ChangeServiceType']");
               if (!form) return 'no-form';
               if (typeof sendPostAndReplaceContent === 'function') {
                 sendPostAndReplaceContent(url, form.id, true);
@@ -487,11 +487,15 @@ class BookingModule:
 
                   function hasCloseButton(el) {
                     const CLOSE_LABELS = ['schließen', 'ok', 'close', 'bestätigen', 'weiter', '×', 'x'];
-                    // Explicit close selectors first
+                    // Explicit close selectors (including sim24-specific classes/titles)
                     for (const sel of [
                       '[data-dismiss]', '.close', '.btn-close',
                       '[aria-label="Close"]', '[aria-label="Schließen"]',
                       'button[type="button"]',
+                      '.c-overlay-close-icon',
+                      '.c-overlay-close',
+                      '[title="Dialog Schließen"]',
+                      '[title="Schließen"]',
                     ]) {
                       try {
                         const btn = el.querySelector(sel);
@@ -499,9 +503,9 @@ class BookingModule:
                       } catch (e) {}
                     }
                     // Any visible button/link whose text matches a close label
-                    for (const btn of el.querySelectorAll('button, a[role="button"], a.btn')) {
+                    for (const btn of el.querySelectorAll('button, a[role="button"], a.btn, a')) {
                       if (!isVisible(btn)) continue;
-                      const txt = btn.textContent.toLowerCase().trim();
+                      const txt = (btn.textContent || btn.title || '').toLowerCase().trim();
                       if (CLOSE_LABELS.some(l => txt === l || txt.includes(l))) return true;
                     }
                     return false;
