@@ -64,8 +64,9 @@ class ConfigManager:
         """Fetch current config state from GitHub Gist."""
         try:
             headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
+                "Authorization": f"Bearer {self.github_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
             }
             resp = requests.get(
                 f"https://api.github.com/gists/{self.gist_id}",
@@ -86,8 +87,9 @@ class ConfigManager:
         """Persist current state back to GitHub Gist."""
         try:
             headers = {
-                "Authorization": f"token {self.github_token}",
-                "Accept": "application/vnd.github.v3+json"
+                "Authorization": f"Bearer {self.github_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
             }
             payload = {
                 "files": {
@@ -105,4 +107,12 @@ class ConfigManager:
             resp.raise_for_status()
             print(f"[CONFIG] State saved to Gist: {self._state}")
         except Exception as e:
-            print(f"[CONFIG] Could not save Gist state: {e}")
+            status = getattr(getattr(e, 'response', None), 'status_code', None)
+            if status == 403:
+                print("[CONFIG] ⚠️ Gist save failed (403 Forbidden). "
+                      "Ensure GIST_TOKEN is a classic PAT with the 'gist' scope — "
+                      "fine-grained PATs do not support the Gist API.")
+            elif status == 404:
+                print(f"[CONFIG] ⚠️ Gist save failed (404 Not Found). Check GIST_ID is correct.")
+            else:
+                print(f"[CONFIG] Could not save Gist state: {e}")

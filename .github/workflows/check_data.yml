@@ -15,6 +15,8 @@ jobs:
   check-and-book:
     runs-on: ubuntu-latest
     timeout-minutes: 10       # Kill if hangs (safety net)
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       # ── Checkout repository ──────────────────────────────────────────────

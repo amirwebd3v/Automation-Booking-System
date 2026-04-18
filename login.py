@@ -117,7 +117,11 @@ class Sim24Login:
                             print("[LOGIN] JS submitForm failed — pressing Enter on password field")
                             await page.press("#UserLoginType_password", "Enter")
 
-                    await asyncio.sleep(2)
+                    # Wait for redirect to complete rather than using a fixed sleep.
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10_000)
+                    except Exception:
+                        pass
 
                     if await captcha.is_captcha_present():
                         print("[LOGIN] Captcha detected after submit (Flow B).")
@@ -130,7 +134,10 @@ class Sim24Login:
                         submit_clicked = await self._click_submit(page)
                         if not submit_clicked:
                             await page.evaluate("submitForm('loginAction')")
-                        await asyncio.sleep(2)
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=10_000)
+                        except Exception:
+                            pass
 
                     current_url = page.url
 
