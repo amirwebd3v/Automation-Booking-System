@@ -26,6 +26,8 @@ class TelegramNotifier:
                 }
                 async with session.post(self._url("sendMessage"), json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     data = await resp.json()
+                    if not data.get("ok", False):
+                        print(f"[TELEGRAM] sendMessage failed: {data.get('description', data)}")
                     return data.get("ok", False)
         except Exception as e:
             print(f"[TELEGRAM] Send failed: {e}")
@@ -50,6 +52,8 @@ class TelegramNotifier:
                 )
                 async with session.post(self._url("sendPhoto"), data=form, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     data = await resp.json()
+                    if not data.get("ok", False):
+                        print(f"[TELEGRAM] sendPhoto failed: {data.get('description', data)}")
                     return data.get("ok", False)
         except Exception as e:
             print(f"[TELEGRAM] Send photo failed: {e}")
