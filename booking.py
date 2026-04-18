@@ -80,20 +80,20 @@ class BookingModule:
             )
             return False
 
+        # ── Pre-flight: dismiss cookie consent before it can block the click ──
+        if await self._handle_cookie_consent():
+            self._log("[BOOKING] ✅ Pre-click cookie consent dismissed.")
+
         # ── Steps 2–3: Click Buchen while capturing getChangeServiceInfo ───
-        # expect_response must wrap the click so the listener is active when
-        # the AJAX call fires.  Timeout is generous (30 s) to survive a slow
-        # standard-click timeout + force-click attempt.
+        # expect_response timeout covers all click fallbacks:
+        # standard click (10s) + force click (5s) + AJAX response arrival (10s) = 25s.
         clicked      = False
         click_method = None
         modal_html   = None
-
-        # expect_response timeout must cover all fallback click attempts:
-        # standard click (10s) + force click (5s) + response arrival (~15s) = 60s.
         try:
             async with self.page.expect_response(
                 lambda r: "getChangeServiceInfo" in r.url,
-                timeout=60_000,
+                timeout=25_000,
             ) as resp_info:
 
                 try:
@@ -165,14 +165,12 @@ class BookingModule:
 
         self._log(f"[BOOKING] ✅ Book button clicked via {click_method}.")
 
-        await self._wait_for_booking_modal(timeout_seconds=10)
-
-        # ── Step 4: Dismiss cookie consent if it appeared ─────────────────
+        # ── Step 4: Fallback cookie consent dismiss ────────────────────────
+        # Handles the rare case where consent fires as a result of the click.
         if await self._handle_cookie_consent():
-            self._log("[BOOKING] ✅ Cookie consent dismissed.")
-            await self._wait_for_booking_modal(timeout_seconds=10)
+            self._log("[BOOKING] ✅ Post-click cookie consent dismissed.")
 
-        # ── Step 5: Handle captcha if present ─────────────────────────
+        # ── Step 5: Handle captcha if present ─────────────────────────────
         captcha_handled = False
         if await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha detected.")
@@ -386,10 +384,8 @@ class BookingModule:
             pass
 
     async def _verify_success(self) -> bool:
-        # Wait for any loading spinner to clear before inspecting the page.
-        await self._wait_for_loading()
-
         # Poll up to 20 s for the success modal to appear.
+        # (Loading wait already done by the activation step that preceded this.)
         POLL_INTERVAL = 1.5   # seconds between checks
         POLL_TIMEOUT  = 20.0  # total seconds before giving up
         deadline = asyncio.get_event_loop().time() + POLL_TIMEOUT

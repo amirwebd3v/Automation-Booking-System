@@ -44,7 +44,7 @@ def test_load_state_from_gist(config_env, monkeypatch):
     assert manager.interval_minutes == 25
     assert manager.last_run_ts == 123.4
     assert requested["url"] == "https://api.github.com/gists/gist-id"
-    assert requested["headers"]["Authorization"] == "token gist-token"
+    assert requested["headers"]["Authorization"] == "Bearer gist-token"
     assert requested["timeout"] == 10
 
 
