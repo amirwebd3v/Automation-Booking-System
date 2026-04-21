@@ -3,4 +3,4 @@ playwright-stealth==1.0.6
 google-generativeai==0.8.5
 aiohttp==3.9.5
 requests==2.32.3
-python-dotenv==1.0.1
+python-dotenv==1.2.2
