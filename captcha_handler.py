@@ -15,8 +15,14 @@ except ImportError:
 
 
 CAPTCHA_PROMPT = (
-    "Read the alphanumeric text in this CAPTCHA. Respond ONLY with the "
-    "characters you see. No spaces, no punctuation, no other text."
+    "This is a CAPTCHA image containing distorted or wavy text. "
+    "Read every character in the image extremely carefully, one by one, "
+    "from left to right. The text is typically 5-6 alphanumeric characters "
+    "and may be lowercase letters, uppercase letters, or digits. "
+    "Characters are often warped, tilted, or overlapping — examine each one "
+    "individually. Return ONLY the exact characters you see with no spaces, "
+    "no punctuation, and no explanation. Do not guess; transcribe only what "
+    "is clearly visible in the image."
 )
 
 CAPTCHA_SELECTORS = [
@@ -128,6 +134,19 @@ def _resolve_gemini_model() -> str:
     )
 
 
+async def _wait_for_image_load(page: Page, selector: str, timeout_ms: int = 10_000) -> None:
+    """Wait until the <img> matched by *selector* has fully loaded its pixel data."""
+    try:
+        await page.wait_for_function(
+            "(sel) => { const el = document.querySelector(sel); "
+            "return !!el && el.complete && el.naturalWidth > 0; }",
+            selector,
+            timeout=timeout_ms,
+        )
+    except Exception:
+        pass  # Proceed anyway — the screenshot may still be usable
+
+
 async def _extract_gemini_text(image_b64: str) -> str:
     model = genai.GenerativeModel(_resolve_gemini_model())
     response = await asyncio.to_thread(
@@ -174,6 +193,7 @@ async def solve_captcha_with_gemini(page: Page, captcha_element_selector: str) -
     """Capture a CAPTCHA image, solve it with Gemini, and fill the input field."""
     captcha_element = page.locator(captcha_element_selector).first
     await captcha_element.wait_for(state="visible", timeout=10_000)
+    await _wait_for_image_load(page, captcha_element_selector)
 
     screenshot_bytes = await captcha_element.screenshot(type="png")
     image_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
@@ -255,6 +275,10 @@ class CaptchaHandler:
                     except Exception:
                         pass
 
+                    # Wait for the new image to fully render before we screenshot it
+                    if current_selector:
+                        await _wait_for_image_load(self.page, current_selector)
+
                 await self.wait_for_loading(timeout_seconds=10)
                 print(f"[CAPTCHA] Captcha image reloaded via: {selector}")
                 return True
@@ -315,7 +339,7 @@ class CaptchaHandler:
         except Exception:
             pass
 
-    async def solve_with_retry(self, max_attempts: int = 3) -> bool:
+    async def solve_with_retry(self, max_attempts: int = 5) -> bool:
         last_error: Optional[Exception] = None
 
         for attempt in range(1, max_attempts + 1):
