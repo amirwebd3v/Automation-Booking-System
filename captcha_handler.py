@@ -66,6 +66,9 @@ SPINNER_SELECTORS = [
     "[class*='spinner']",
 ]
 
+MANUAL_CAPTCHA_TIMEOUT_SECONDS = 120
+MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS = 5
+
 
 class CaptchaAutomationError(RuntimeError):
     """Base class for autonomous CAPTCHA errors."""
@@ -251,17 +254,21 @@ class CaptchaHandler:
             print("[CAPTCHA] No Telegram notifier — cannot request manual solve.")
             return None
 
+        if self.config_manager is None:
+            print("[CAPTCHA] No config manager — cannot request manual solve.")
+            return None
+
         image_bytes = await self._screenshot_captcha()
         if image_bytes is None:
             print("[CAPTCHA] Could not capture captcha image for manual solve.")
             return None
 
         # Mark captcha as pending in Gist so the scheduler bot forwards the reply.
-        if self.config_manager is not None:
-            try:
-                self.config_manager.set_captcha_pending(True)
-            except Exception as exc:
-                print(f"[CAPTCHA] Could not set captcha_pending in Gist: {exc}")
+        try:
+            self.config_manager.set_captcha_pending(True)
+        except Exception as exc:
+            print(f"[CAPTCHA] Could not set captcha_pending in Gist: {exc}")
+            return None
 
         sent = await self.telegram.send_photo(
             image_bytes,
@@ -269,48 +276,45 @@ class CaptchaHandler:
                 "\U0001f510 *Manual CAPTCHA required*\n"
                 "Gemini could not solve the captcha after 2 attempts.\n"
                 "Please *reply with the code* shown in this image.\n"
-                "_You have 5 minutes._"
+                "_You have 2 minutes._"
             ),
         )
         if not sent:
             print("[CAPTCHA] Failed to send captcha image to Telegram.")
-            if self.config_manager is not None:
-                try:
-                    self.config_manager.clear_captcha_state()
-                except Exception:
-                    pass
-            return None
-
-        print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
-
-        # Poll Gist every 5 seconds for up to 5 minutes.
-        solution: Optional[str] = None
-        timeout_seconds = 300
-        poll_interval = 5
-        for _ in range(timeout_seconds // poll_interval):
-            if self.config_manager is not None:
-                try:
-                    reply = self.config_manager.get_captcha_reply()
-                    if reply:
-                        solution = re.sub(r"[^A-Za-z0-9]", "", reply).strip() or None
-                        if solution:
-                            print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
-                            break
-                except Exception as exc:
-                    print(f"[CAPTCHA] Error polling Gist for captcha reply: {exc}")
-            await asyncio.sleep(poll_interval)
-
-        if self.config_manager is not None:
             try:
                 self.config_manager.clear_captcha_state()
             except Exception:
                 pass
+            return None
+
+        print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 120 sec)...")
+
+        # Poll Gist every few seconds for up to 2 minutes.
+        solution: Optional[str] = None
+        timeout_seconds = MANUAL_CAPTCHA_TIMEOUT_SECONDS
+        poll_interval = MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS
+        for _ in range(timeout_seconds // poll_interval):
+            try:
+                reply = self.config_manager.get_captcha_reply()
+                if reply:
+                    solution = re.sub(r"[^A-Za-z0-9]", "", reply).strip() or None
+                    if solution:
+                        print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
+                        break
+            except Exception as exc:
+                print(f"[CAPTCHA] Error polling Gist for captcha reply: {exc}")
+            await asyncio.sleep(poll_interval)
+
+        try:
+            self.config_manager.clear_captcha_state()
+        except Exception:
+            pass
 
         if not solution:
             print("[CAPTCHA] Timed out waiting for manual captcha reply.")
             await self.telegram.send(
                 "\u23f3 *CAPTCHA manual input timed out.*\n"
-                "No reply received within 5 minutes. The booking attempt has been abandoned."
+                "No reply received within 2 minutes. The booking attempt has been abandoned."
             )
 
         return solution
