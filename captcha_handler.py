@@ -249,25 +249,14 @@ class CaptchaHandler:
             return None
 
     async def _request_manual_solution(self) -> Optional[str]:
-        """Send the CAPTCHA image to Telegram and wait for the user to reply via the scheduler bot."""
+        """Send the CAPTCHA image to Telegram and wait for the user to reply directly."""
         if self.telegram is None:
             print("[CAPTCHA] No Telegram notifier — cannot request manual solve.")
-            return None
-
-        if self.config_manager is None:
-            print("[CAPTCHA] No config manager — cannot request manual solve.")
             return None
 
         image_bytes = await self._screenshot_captcha()
         if image_bytes is None:
             print("[CAPTCHA] Could not capture captcha image for manual solve.")
-            return None
-
-        # Mark captcha as pending in Gist so the scheduler bot forwards the reply.
-        try:
-            self.config_manager.set_captcha_pending(True)
-        except Exception as exc:
-            print(f"[CAPTCHA] Could not set captcha_pending in Gist: {exc}")
             return None
 
         # Send a text alert first — text messages trigger push notifications more
@@ -288,42 +277,27 @@ class CaptchaHandler:
         )
         if not sent:
             print("[CAPTCHA] Failed to send captcha image to Telegram.")
-            try:
-                self.config_manager.clear_captcha_state()
-            except Exception:
-                pass
             return None
 
         print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
 
-        # Poll Gist every few seconds for up to 2 minutes.
-        solution: Optional[str] = None
-        timeout_seconds = MANUAL_CAPTCHA_TIMEOUT_SECONDS
-        poll_interval = MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS
-        for _ in range(timeout_seconds // poll_interval):
-            try:
-                reply = self.config_manager.get_captcha_reply()
-                if reply:
-                    solution = re.sub(r"[^A-Za-z0-9]", "", reply).strip() or None
-                    if solution:
-                        print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
-                        break
-            except Exception as exc:
-                print(f"[CAPTCHA] Error polling Gist for captcha reply: {exc}")
-            await asyncio.sleep(poll_interval)
+        # Poll Telegram's getUpdates directly — no external bot required.
+        raw_reply = await self.telegram.wait_for_reply(
+            timeout_seconds=MANUAL_CAPTCHA_TIMEOUT_SECONDS,
+            poll_interval=MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS,
+        )
 
-        try:
-            self.config_manager.clear_captcha_state()
-        except Exception:
-            pass
-
-        if not solution:
+        if not raw_reply:
             print("[CAPTCHA] Timed out waiting for manual captcha reply.")
             await self.telegram.send(
                 "\u23f3 *CAPTCHA manual input timed out.*\n"
                 "No reply received within 5 minutes. The booking attempt has been abandoned."
             )
+            return None
 
+        solution = re.sub(r"[^A-Za-z0-9]", "", raw_reply).strip() or None
+        if solution:
+            print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
         return solution
 
     async def _enter_manual_solution(self, reason: str) -> None:
@@ -449,9 +423,7 @@ class CaptchaHandler:
 
     async def solve_with_retry(self, max_attempts: int = 3) -> bool:
         last_error: Optional[Exception] = None
-        use_manual_on_last = (
-            self.telegram is not None and self.config_manager is not None
-        )
+        use_manual_on_last = self.telegram is not None
 
         for attempt in range(1, max_attempts + 1):
             print(f"[CAPTCHA] Solve attempt {attempt}/{max_attempts}")
