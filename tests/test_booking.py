@@ -133,4 +133,4 @@ async def test_book_packet_handles_post_activation_captcha(monkeypatch):
     monkeypatch.setattr(booker.captcha, "solve_with_retry", solve_with_retry)
 
     assert await booker.book_2gb_packet() is True
-    solve_with_retry.assert_awaited_once_with(max_attempts=3)
+    solve_with_retry.assert_awaited_once_with(max_attempts=5)
