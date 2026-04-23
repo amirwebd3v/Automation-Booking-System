@@ -42,6 +42,11 @@ GITHUB_WORKFLOW_REF = os.environ.get("GITHUB_WORKFLOW_REF", "main")
 
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+
+def get_message_text(message: dict) -> str:
+    """Extract plain user text from standard messages and captioned replies."""
+    return (message.get("text") or message.get("caption") or "").strip()
+
 # ── Gist helpers ────────────────────────────────────────────────────────────
 
 def load_gist() -> dict:
@@ -103,7 +108,7 @@ async def send_message(chat_id: str, text: str):
 
 async def handle_message(message: dict):
     chat_id = str(message.get("chat", {}).get("id", ""))
-    text    = message.get("text", "").strip()
+    text    = get_message_text(message)
 
     # Security: only respond to authorized chat
     if chat_id != AUTHORIZED_CHAT:
@@ -182,11 +187,21 @@ async def handle_message(message: dict):
     else:
         # If a CAPTCHA challenge is pending, treat any plain-text reply as the solution.
         if text and not text.startswith("/"):
-            state = load_gist()
+            try:
+                state = load_gist()
+            except Exception as e:
+                print(f"[BOT] Failed to load Gist for captcha reply: {e}")
+                await send_message(chat_id,
+                    "❌ *Failed to load CAPTCHA state from Gist.*\n"
+                    "Check the bot logs and verify `GIST_TOKEN` / `GIST_ID` are set correctly."
+                )
+                return
+
             if state.get("captcha_pending"):
                 state["captcha_reply"] = text
                 state["captcha_pending"] = False
                 if save_gist(state):
+                    print("[BOT] Manual captcha reply saved to Gist.")
                     await send_message(chat_id,
                         f"✅ *Captcha code submitted:* `{text}`\n"
                         "The booking workflow will pick it up now."
