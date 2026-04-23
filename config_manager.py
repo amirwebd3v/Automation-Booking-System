@@ -24,7 +24,7 @@ class ConfigManager:
         self.sim24_username   = os.environ["SIM24_USERNAME"]
         self.sim24_password   = os.environ["SIM24_PASSWORD"]
         self.github_token     = os.environ["GIST_TOKEN"]
-        self.gist_id          = os.environ["GITHUB_GIST_ID"]
+        self.gist_id          = os.environ["GIST_ID"]
 
         # Load dynamic config from Gist
         self._state = self._load_state()

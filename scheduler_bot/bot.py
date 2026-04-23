@@ -17,7 +17,7 @@ Deploy to Render.com:
   - Root directory:  scheduler_bot
   - Build command:   pip install -r requirements_bot.txt
   - Start command:   python bot.py
-  - Add env vars:    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GIST_TOKEN, GITHUB_GIST_ID
+  - Add env vars:    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GIST_TOKEN, GIST_ID
 """
 
 import os
@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 AUTHORIZED_CHAT = str(os.environ["TELEGRAM_CHAT_ID"])
 GITHUB_TOKEN    = os.environ["GIST_TOKEN"]
-GIST_ID         = os.environ["GITHUB_GIST_ID"]
+GIST_ID         = os.environ["GIST_ID"]
 GIST_FILENAME   = "sim24_bot_config.json"
 GITHUB_REPO_OWNER = os.environ.get("GITHUB_REPO_OWNER", "amirwebd3v")
 GITHUB_REPO_NAME  = os.environ.get("GITHUB_REPO_NAME", "Automation-Booking-System")
