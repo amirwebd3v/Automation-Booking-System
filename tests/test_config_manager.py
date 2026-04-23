@@ -12,7 +12,7 @@ def config_env(monkeypatch):
     monkeypatch.setenv("SIM24_USERNAME", "user")
     monkeypatch.setenv("SIM24_PASSWORD", "pass")
     monkeypatch.setenv("GIST_TOKEN", "gist-token")
-    monkeypatch.setenv("GITHUB_GIST_ID", "gist-id")
+    monkeypatch.setenv("GIST_ID", "gist-id")
 
 
 def test_load_state_from_gist(config_env, monkeypatch):
