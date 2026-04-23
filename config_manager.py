@@ -23,7 +23,7 @@ class ConfigManager:
         self.telegram_chat_id = os.environ["TELEGRAM_CHAT_ID"]
         self.sim24_username   = os.environ["SIM24_USERNAME"]
         self.sim24_password   = os.environ["SIM24_PASSWORD"]
-        self.github_token     = os.environ["GITHUB_GIST_TOKEN"]
+        self.github_token     = os.environ["GIST_TOKEN"]
         self.gist_id          = os.environ["GITHUB_GIST_ID"]
 
         # Load dynamic config from Gist
@@ -51,12 +51,18 @@ class ConfigManager:
     def update_last_run(self):
         """Saves current timestamp as last_run to Gist."""
         self._state["last_run_ts"] = time.time()
-        self._save_state()
+        try:
+            self._save_state()
+        except Exception:
+            pass  # Non-critical; a missed timestamp is acceptable
 
     def set_interval(self, minutes: int):
         """Called by scheduler bot to change check interval."""
         self._state["interval_minutes"] = max(5, minutes)  # Minimum 5 min (default 10)
-        self._save_state()
+        try:
+            self._save_state()
+        except Exception:
+            pass  # Caller (scheduler bot) uses save_gist directly and handles errors itself
 
     def set_captcha_pending(self, pending: bool) -> None:
         """Signal the scheduler bot that a CAPTCHA is waiting for manual input."""
@@ -127,10 +133,12 @@ class ConfigManager:
         except Exception as e:
             status = getattr(getattr(e, 'response', None), 'status_code', None)
             if status == 403:
-                print("[CONFIG] ⚠️ Gist save failed (403 Forbidden). "
-                      "Ensure GIST_TOKEN is a classic PAT with the 'gist' scope — "
-                      "fine-grained PATs do not support the Gist API.")
+                msg = ("[CONFIG] ⚠️ Gist save failed (403 Forbidden). "
+                       "Ensure GIST_TOKEN is a classic PAT with the 'gist' scope — "
+                       "fine-grained PATs do not support the Gist API.")
             elif status == 404:
-                print(f"[CONFIG] ⚠️ Gist save failed (404 Not Found). Check GIST_ID is correct.")
+                msg = f"[CONFIG] ⚠️ Gist save failed (404 Not Found). Check GIST_ID is correct."
             else:
-                print(f"[CONFIG] Could not save Gist state: {e}")
+                msg = f"[CONFIG] Could not save Gist state: {e}"
+            print(msg)
+            raise RuntimeError(msg) from e

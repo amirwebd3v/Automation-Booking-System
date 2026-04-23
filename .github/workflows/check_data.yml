@@ -66,7 +66,7 @@ jobs:
           SIM24_USERNAME:     ${{ secrets.SIM24_USERNAME }}
           SIM24_PASSWORD:     ${{ secrets.SIM24_PASSWORD }}
           GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
-          GITHUB_GIST_TOKEN:  ${{ secrets.GIST_TOKEN }}
+          GIST_TOKEN:  ${{ secrets.GIST_TOKEN }}
           GITHUB_GIST_ID:     ${{ secrets.GIST_ID }}
         run: |
           python main.py

@@ -119,7 +119,7 @@ Reads these variables:
 2. `TELEGRAM_CHAT_ID`
 3. `SIM24_USERNAME`
 4. `SIM24_PASSWORD`
-5. `GITHUB_GIST_TOKEN`
+5. `GIST_TOKEN`
 6. `GITHUB_GIST_ID`
 
 State model stored in the Gist file `sim24_bot_config.json`:
@@ -385,7 +385,7 @@ Set these repository secrets:
 | `TELEGRAM_CHAT_ID` | Authorized Telegram chat id |
 | `SIM24_USERNAME` | sim24 username or phone number |
 | `SIM24_PASSWORD` | sim24 online password |
-| `GIST_TOKEN` | Token injected into `GITHUB_GIST_TOKEN` |
+| `GIST_TOKEN` | Token injected into `GIST_TOKEN` |
 | `GIST_ID` | Gist id injected into `GITHUB_GIST_ID` |
 
 ### 5. Local `.env`
@@ -397,7 +397,7 @@ TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 SIM24_USERNAME=your_username_or_phone_number
 SIM24_PASSWORD=your_online_password
-GITHUB_GIST_TOKEN=ghp_your_gist_token
+GIST_TOKEN=ghp_your_gist_token
 GITHUB_GIST_ID=your_gist_id_here
 USE_EDGE=true
 ```
@@ -408,7 +408,7 @@ For `scheduler_bot/bot.py`, configure:
 
 1. `TELEGRAM_BOT_TOKEN`
 2. `TELEGRAM_CHAT_ID`
-3. `GITHUB_GIST_TOKEN`
+3. `GIST_TOKEN`
 4. `GITHUB_GIST_ID`
 
 Optional overrides used by `/book`:

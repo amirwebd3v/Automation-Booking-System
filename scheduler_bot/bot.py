@@ -17,7 +17,7 @@ Deploy to Render.com:
   - Root directory:  scheduler_bot
   - Build command:   pip install -r requirements_bot.txt
   - Start command:   python bot.py
-  - Add env vars:    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GITHUB_GIST_TOKEN, GITHUB_GIST_ID
+  - Add env vars:    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GIST_TOKEN, GITHUB_GIST_ID
 """
 
 import os
@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 # ── Config ─────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 AUTHORIZED_CHAT = str(os.environ["TELEGRAM_CHAT_ID"])
-GITHUB_TOKEN    = os.environ["GITHUB_GIST_TOKEN"]
+GITHUB_TOKEN    = os.environ["GIST_TOKEN"]
 GIST_ID         = os.environ["GITHUB_GIST_ID"]
 GIST_FILENAME   = "sim24_bot_config.json"
 GITHUB_REPO_OWNER = os.environ.get("GITHUB_REPO_OWNER", "amirwebd3v")
@@ -55,7 +55,7 @@ def load_gist() -> dict:
     return json.loads(content)
 
 
-def save_gist(data: dict):
+def save_gist(data: dict) -> bool:
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
@@ -67,7 +67,10 @@ def save_gist(data: dict):
             }
         }
     }
-    requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=payload, timeout=10)
+    resp = requests.patch(f"https://api.github.com/gists/{GIST_ID}", headers=headers, json=payload, timeout=10)
+    if not resp.ok:
+        print(f"[BOT] Gist save failed ({resp.status_code}): {resp.text[:200]}")
+    return resp.ok
 
 
 def trigger_workflow_dispatch() -> None:
@@ -183,11 +186,16 @@ async def handle_message(message: dict):
             if state.get("captcha_pending"):
                 state["captcha_reply"] = text
                 state["captcha_pending"] = False
-                save_gist(state)
-                await send_message(chat_id,
-                    f"✅ *Captcha code submitted:* `{text}`\n"
-                    "The booking workflow will pick it up now."
-                )
+                if save_gist(state):
+                    await send_message(chat_id,
+                        f"✅ *Captcha code submitted:* `{text}`\n"
+                        "The booking workflow will pick it up now."
+                    )
+                else:
+                    await send_message(chat_id,
+                        "❌ *Failed to save captcha reply to Gist.*\n"
+                        "Check the bot logs and verify `GIST_TOKEN` is a classic PAT with the `gist` scope."
+                    )
                 return
         # Ignore all other unknown messages
 
