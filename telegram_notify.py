@@ -13,6 +13,12 @@ class TelegramNotifier:
     def _url(self, method: str) -> str:
         return self.BASE_URL.format(token=self.token, method=method)
 
+    def _mask_chat_id(self, chat_id: str | int | None = None) -> str:
+        value = str(chat_id if chat_id is not None else self.chat_id)
+        if len(value) <= 4:
+            return value
+        return f"...{value[-4:]}"
+
     # ── Send plain text message ───────────────────────────────────────────────
 
     async def send(self, text: str) -> bool:
@@ -28,6 +34,9 @@ class TelegramNotifier:
                     data = await resp.json()
                     if not data.get("ok", False):
                         print(f"[TELEGRAM] sendMessage failed: {data.get('description', data)}")
+                    else:
+                        result_chat_id = data.get("result", {}).get("chat", {}).get("id", self.chat_id)
+                        print(f"[TELEGRAM] sendMessage ok to chat {self._mask_chat_id(result_chat_id)}")
                     return data.get("ok", False)
         except Exception as e:
             print(f"[TELEGRAM] Send failed: {e}")
@@ -54,6 +63,9 @@ class TelegramNotifier:
                     data = await resp.json()
                     if not data.get("ok", False):
                         print(f"[TELEGRAM] sendPhoto failed: {data.get('description', data)}")
+                    else:
+                        result_chat_id = data.get("result", {}).get("chat", {}).get("id", self.chat_id)
+                        print(f"[TELEGRAM] sendPhoto ok to chat {self._mask_chat_id(result_chat_id)}")
                     return data.get("ok", False)
         except Exception as e:
             print(f"[TELEGRAM] Send photo failed: {e}")

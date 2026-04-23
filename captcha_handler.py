@@ -270,21 +270,41 @@ class CaptchaHandler:
             print(f"[CAPTCHA] Could not set captcha_pending in Gist: {exc}")
             return None
 
-        sent = await self.telegram.send_photo(
+        prompt_text = (
+            "\U0001f510 *Manual CAPTCHA required*\n"
+            "Gemini could not solve the captcha after 2 attempts.\n"
+            "Please *reply with the code* in the *same Telegram chat* that receives this alert.\n"
+            "_You have 2 minutes._"
+        )
+
+        prompt_sent = await self.telegram.send(prompt_text)
+
+        photo_sent = await self.telegram.send_photo(
             image_bytes,
             caption=(
-                "\U0001f510 *Manual CAPTCHA required*\n"
-                "Gemini could not solve the captcha after 2 attempts.\n"
-                "Please *reply with the code* shown in this image.\n"
-                "_You have 2 minutes._"
+                "Reply with the captcha code shown in this image.\n"
+                "Use the *same chat* that received this message."
             ),
         )
-        if not sent:
-            print("[CAPTCHA] Failed to send captcha image to Telegram.")
+
+        if not prompt_sent and not photo_sent:
+            print("[CAPTCHA] Failed to send manual captcha prompt to Telegram.")
             try:
                 self.config_manager.clear_captcha_state()
             except Exception:
                 pass
+            return None
+
+        if not photo_sent:
+            print("[CAPTCHA] Manual prompt text was sent, but the captcha image failed to upload.")
+            try:
+                self.config_manager.clear_captcha_state()
+            except Exception:
+                pass
+            await self.telegram.send(
+                "❌ *Captcha image upload failed.*\n"
+                "Check the workflow logs for the target chat id and verify you are watching the same Telegram chat."
+            )
             return None
 
         print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 120 sec)...")
