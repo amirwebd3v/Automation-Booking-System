@@ -174,7 +174,7 @@ class BookingModule:
         captcha_handled = False
         if await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha detected.")
-            captcha_ok = await self.captcha.solve_with_retry(max_attempts=3)
+            captcha_ok = await self.captcha.solve_with_retry(max_attempts=5)
             if not captcha_ok:
                 self._log("[BOOKING] ❌ Captcha solving failed.")
                 return False
@@ -211,7 +211,7 @@ class BookingModule:
             await self._wait_for_loading()
         if not captcha_handled and await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha appeared in server response after activation.")
-            captcha_ok = await self.captcha.solve_with_retry(max_attempts=3)
+            captcha_ok = await self.captcha.solve_with_retry(max_attempts=5)
             if not captcha_ok:
                 self._log("[BOOKING] ❌ Post-activation captcha failed.")
                 return False
