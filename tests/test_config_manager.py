@@ -11,7 +11,7 @@ def config_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
     monkeypatch.setenv("SIM24_USERNAME", "user")
     monkeypatch.setenv("SIM24_PASSWORD", "pass")
-    monkeypatch.setenv("GITHUB_GIST_TOKEN", "gist-token")
+    monkeypatch.setenv("GIST_TOKEN", "gist-token")
     monkeypatch.setenv("GITHUB_GIST_ID", "gist-id")
 
 
