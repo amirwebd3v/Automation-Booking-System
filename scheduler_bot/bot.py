@@ -177,8 +177,19 @@ async def handle_message(message: dict):
             )
 
     else:
-        # Ignore unknown messages (may be captcha replies handled by main bot)
-        pass
+        # If a CAPTCHA challenge is pending, treat any plain-text reply as the solution.
+        if text and not text.startswith("/"):
+            state = load_gist()
+            if state.get("captcha_pending"):
+                state["captcha_reply"] = text
+                state["captcha_pending"] = False
+                save_gist(state)
+                await send_message(chat_id,
+                    f"✅ *Captcha code submitted:* `{text}`\n"
+                    "The booking workflow will pick it up now."
+                )
+                return
+        # Ignore all other unknown messages
 
 # ── Main polling loop ────────────────────────────────────────────────────────
 

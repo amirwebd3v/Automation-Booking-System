@@ -37,10 +37,10 @@ FALLBACK_ACTIVATE_URL = "/mytariff/invoice/changeService"
 
 
 class BookingModule:
-    def __init__(self, page: Page, telegram: TelegramNotifier):
+    def __init__(self, page: Page, telegram: TelegramNotifier, config_manager=None):
         self.page     = page
         self.telegram = telegram
-        self.captcha  = CaptchaHandler(page, telegram)
+        self.captcha  = CaptchaHandler(page, telegram, config_manager)
         self._trace: list[str] = []
 
     def _log(self, msg: str) -> None:
@@ -174,7 +174,7 @@ class BookingModule:
         captcha_handled = False
         if await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha detected.")
-            captcha_ok = await self.captcha.solve_with_retry(max_attempts=5)
+            captcha_ok = await self.captcha.solve_with_retry(max_attempts=3)
             if not captcha_ok:
                 self._log("[BOOKING] ❌ Captcha solving failed.")
                 return False
@@ -211,7 +211,7 @@ class BookingModule:
             await self._wait_for_loading()
         if not captcha_handled and await self.captcha.is_captcha_present():
             self._log("[BOOKING] 🔐 Captcha appeared in server response after activation.")
-            captcha_ok = await self.captcha.solve_with_retry(max_attempts=5)
+            captcha_ok = await self.captcha.solve_with_retry(max_attempts=3)
             if not captcha_ok:
                 self._log("[BOOKING] ❌ Post-activation captcha failed.")
                 return False
