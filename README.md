@@ -5,7 +5,7 @@ This project automates sim24.de data checks and books a 2 GB packet when remaini
 The repository currently contains two runtimes:
 
 1. A scheduled GitHub Actions workflow that runs the booking pipeline.
-2. A small always-on Telegram control bot intended to run on Render.
+2. A small always-on Telegram control bot that handles commands and captcha replies.
 
 Both runtimes share state through a GitHub Gist.
 
@@ -49,7 +49,7 @@ main.py
     -> BookingModule attempts booking if threshold is crossed
     -> ConfigManager writes updated last_run_ts back to the Gist
 
-Render / always-on process (scheduler_bot/bot.py)
+Always-on process (scheduler_bot/bot.py)
     -> long-polls Telegram
     -> accepts /interval, /status, /help, /book
     -> reads/writes the same Gist state
@@ -321,7 +321,7 @@ This is currently the only automated test file in the repository.
 2. Telegram Bot API for messaging and captcha replies.
 3. GitHub Gist as the persistent state store.
 4. GitHub Actions as the scheduled execution environment.
-5. Render or any equivalent always-on host for the control bot.
+5. An always-on host for the control bot.
 
 ### Python dependencies
 

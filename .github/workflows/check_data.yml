@@ -14,9 +14,10 @@ on:
 jobs:
   check-and-book:
     runs-on: ubuntu-latest
-    timeout-minutes: 10       # Kill if hangs (safety net)
+    timeout-minutes: 25       # Covers login + captcha retries + 5-min manual reply window
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      PYTHONUNBUFFERED: "1"     # Flush Python stdout immediately so logs appear in real-time
 
     steps:
       # ── Checkout repository ──────────────────────────────────────────────

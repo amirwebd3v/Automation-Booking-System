@@ -66,8 +66,8 @@ SPINNER_SELECTORS = [
     "[class*='spinner']",
 ]
 
-MANUAL_CAPTCHA_TIMEOUT_SECONDS = 120
-MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS = 5
+MANUAL_CAPTCHA_TIMEOUT_SECONDS = 300
+MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS = 3
 
 
 class CaptchaAutomationError(RuntimeError):
@@ -270,44 +270,31 @@ class CaptchaHandler:
             print(f"[CAPTCHA] Could not set captcha_pending in Gist: {exc}")
             return None
 
-        prompt_text = (
-            "\U0001f510 *Manual CAPTCHA required*\n"
-            "Gemini could not solve the captcha after 2 attempts.\n"
-            "Please *reply with the code* in the *same Telegram chat* that receives this alert.\n"
-            "_You have 2 minutes._"
+        # Send a text alert first — text messages trigger push notifications more
+        # reliably than photos, ensuring the user sees the request immediately.
+        await self.telegram.send(
+            "\U0001f6a8 *ACTION REQUIRED — Manual CAPTCHA*\n"
+            "Gemini could not solve the captcha.\n"
+            "The captcha image follows. *Reply with the code within 5 minutes.*"
         )
 
-        prompt_sent = await self.telegram.send(prompt_text)
-
-        photo_sent = await self.telegram.send_photo(
+        sent = await self.telegram.send_photo(
             image_bytes,
             caption=(
-                "Reply with the captcha code shown in this image.\n"
-                "Use the *same chat* that received this message."
+                "\U0001f510 *Manual CAPTCHA required*\n"
+                "Please *reply to this message* with the code shown above.\n"
+                "_You have 5 minutes._"
             ),
         )
-
-        if not prompt_sent and not photo_sent:
-            print("[CAPTCHA] Failed to send manual captcha prompt to Telegram.")
+        if not sent:
+            print("[CAPTCHA] Failed to send captcha image to Telegram.")
             try:
                 self.config_manager.clear_captcha_state()
             except Exception:
                 pass
             return None
 
-        if not photo_sent:
-            print("[CAPTCHA] Manual prompt text was sent, but the captcha image failed to upload.")
-            try:
-                self.config_manager.clear_captcha_state()
-            except Exception:
-                pass
-            await self.telegram.send(
-                "❌ *Captcha image upload failed.*\n"
-                "Check the workflow logs for the target chat id and verify you are watching the same Telegram chat."
-            )
-            return None
-
-        print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 120 sec)...")
+        print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
 
         # Poll Gist every few seconds for up to 2 minutes.
         solution: Optional[str] = None
@@ -334,7 +321,7 @@ class CaptchaHandler:
             print("[CAPTCHA] Timed out waiting for manual captcha reply.")
             await self.telegram.send(
                 "\u23f3 *CAPTCHA manual input timed out.*\n"
-                "No reply received within 2 minutes. The booking attempt has been abandoned."
+                "No reply received within 5 minutes. The booking attempt has been abandoned."
             )
 
         return solution

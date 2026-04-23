@@ -1,7 +1,7 @@
 """
 Scheduler Control Bot
 ─────────────────────
-Tiny always-on bot deployed to Render.com (free tier).
+Always-on Telegram control bot.
 Listens for Telegram commands to change the check interval.
 Updates the GitHub Gist config so the next GitHub Actions run picks it up.
 
@@ -12,12 +12,7 @@ Commands:
     /book            → Trigger booking workflow immediately
   /help            → Show available commands
 
-Deploy to Render.com:
-  - New Web Service → connect this repo
-  - Root directory:  scheduler_bot
-  - Build command:   pip install -r requirements_bot.txt
-  - Start command:   python bot.py
-  - Add env vars:    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GIST_TOKEN, GIST_ID
+Required env vars: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, GIST_TOKEN, GIST_ID
 """
 
 import os
@@ -224,7 +219,7 @@ async def poll():
         while True:
             try:
                 params = {
-                    "timeout":         30,
+                    "timeout":         10,    # 10 s long-poll: picks up replies within 10 s
                     "allowed_updates": ["message"],
                 }
                 if offset is not None:
@@ -233,7 +228,7 @@ async def poll():
                 async with session.get(
                     f"{BASE_URL}/getUpdates",
                     params=params,
-                    timeout=aiohttp.ClientTimeout(total=35)
+                    timeout=aiohttp.ClientTimeout(total=15)
                 ) as resp:
                     data = await resp.json()
 
