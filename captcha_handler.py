@@ -319,6 +319,19 @@ class CaptchaHandler:
 
         return solution
 
+    async def _enter_manual_solution(self, reason: str) -> None:
+        """Request a manual CAPTCHA solve, then enter it into the form field."""
+        print(reason)
+        solution = await self._request_manual_solution()
+        if solution is None:
+            raise CaptchaAutomationError("No manual captcha solution received.")
+
+        entered = await _fill_captcha_input(self.page, solution)
+        if not entered:
+            raise CaptchaAutomationError("CAPTCHA input field was not found.")
+
+        print(f"[CAPTCHA] Manual solution entered: {solution}")
+
     async def enter_solution(self, solution: str) -> bool:
         entered = await _fill_captcha_input(self.page, solution)
         if entered:
@@ -441,18 +454,30 @@ class CaptchaHandler:
 
             is_last = attempt == max_attempts
             try:
+                used_manual_solution = False
                 if is_last and use_manual_on_last:
-                    print("[CAPTCHA] Last attempt — requesting manual solve via Telegram.")
-                    solution = await self._request_manual_solution()
-                    if solution is None:
-                        raise CaptchaAutomationError("No manual captcha solution received.")
-                    entered = await _fill_captcha_input(self.page, solution)
-                    if not entered:
-                        raise CaptchaAutomationError("CAPTCHA input field was not found.")
-                    print(f"[CAPTCHA] Manual solution entered: {solution}")
+                    used_manual_solution = True
+                    await self._enter_manual_solution(
+                        "[CAPTCHA] Last attempt — requesting manual solve via Telegram."
+                    )
                 else:
-                    solution = await self.solve()
-                    if solution is None:
+                    solution: Optional[str] = None
+                    try:
+                        solution = await self.solve()
+                    except Exception as exc:
+                        if use_manual_on_last:
+                            print(f"[CAPTCHA] Gemini solve failed: {exc}")
+                            used_manual_solution = True
+                            await self._enter_manual_solution(
+                                "[CAPTCHA] Falling back to manual solve via Telegram."
+                            )
+                        else:
+                            if isinstance(exc, CaptchaAutomationError):
+                                raise
+                            raise CaptchaAutomationError(
+                                f"Gemini solve failed: {exc}"
+                            ) from exc
+                    if solution is None and not used_manual_solution:
                         raise CaptchaAutomationError("Captcha image was not available for solving.")
 
                 if not await self.click_aktivieren():

@@ -157,3 +157,26 @@ async def test_solve_with_retry_raises_after_retry_budget(monkeypatch):
         await handler.solve_with_retry(max_attempts=3)
 
     assert reload_captcha_image.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_solve_with_retry_falls_back_to_manual_when_gemini_errors(monkeypatch):
+    page = object()
+    handler = captcha_module.CaptchaHandler(
+        page=page,
+        telegram=object(),
+        config_manager=object(),
+    )
+    monkeypatch.setattr(handler, "solve", AsyncMock(side_effect=RuntimeError("quota exceeded")))
+    monkeypatch.setattr(
+        handler,
+        "_request_manual_solution",
+        AsyncMock(return_value="AB12C"),
+    )
+    monkeypatch.setattr(handler, "click_aktivieren", AsyncMock(return_value=True))
+    monkeypatch.setattr(handler, "is_captcha_error", AsyncMock(return_value=False))
+    fill_input = AsyncMock(return_value=True)
+    monkeypatch.setattr(captcha_module, "_fill_captcha_input", fill_input)
+
+    assert await handler.solve_with_retry(max_attempts=3) is True
+    fill_input.assert_awaited_once_with(page, "AB12C")
