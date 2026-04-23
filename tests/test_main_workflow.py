@@ -80,7 +80,7 @@ async def test_full_workflow_books_when_below_threshold(monkeypatch):
             return used_kb, total_kb
 
     class FakeBookingModule:
-        def __init__(self, page, telegram):
+        def __init__(self, page, telegram, config_manager=None):
             assert isinstance(page, FakePage)
 
         async def book_2gb_packet(self):
@@ -154,7 +154,7 @@ async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
             return used_kb, total_kb
 
     class FakeBookingModule:
-        def __init__(self, page, telegram):
+        def __init__(self, page, telegram, config_manager=None):
             state["booking_constructed"] = True
 
         async def book_2gb_packet(self):
