@@ -98,7 +98,7 @@ async def test_main_sends_photo_alert_when_captcha_solver_fails(monkeypatch):
             return used_kb, total_kb
 
     class FailingBookingModule:
-        def __init__(self, page, telegram):
+        def __init__(self, page, telegram, config_manager=None):
             pass
 
         async def book_2gb_packet(self):
@@ -113,4 +113,4 @@ async def test_main_sends_photo_alert_when_captcha_solver_fails(monkeypatch):
     await workflow_main.main()
 
     assert state["browser"].closed is True
-    assert any("Gemini failed to solve the CAPTCHA" in caption for caption in state["captions"])
+    assert any("CAPTCHA could not be solved" in caption for caption in state["captions"])
