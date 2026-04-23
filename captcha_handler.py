@@ -207,9 +207,10 @@ async def solve_captcha_with_gemini(page: Page, captcha_element_selector: str) -
 
 
 class CaptchaHandler:
-    def __init__(self, page: Page, telegram=None):
+    def __init__(self, page: Page, telegram=None, config_manager=None):
         self.page = page
         self.telegram = telegram
+        self.config_manager = config_manager
 
     async def get_captcha_selector(self) -> Optional[str]:
         return await _find_first_visible_selector(self.page, CAPTCHA_SELECTORS)
@@ -229,6 +230,89 @@ class CaptchaHandler:
 
         solution = await solve_captcha_with_gemini(self.page, selector)
         print(f"[CAPTCHA] Gemini solved captcha as: {solution}")
+        return solution
+
+    async def _screenshot_captcha(self) -> Optional[bytes]:
+        """Return raw PNG bytes of the CAPTCHA <img> element only."""
+        selector = await self.get_captcha_selector()
+        if selector is None:
+            return None
+        try:
+            captcha_element = self.page.locator(selector).first
+            await _wait_for_image_load(self.page, selector)
+            return await captcha_element.screenshot(type="png")
+        except Exception as exc:
+            print(f"[CAPTCHA] Could not screenshot captcha element: {exc}")
+            return None
+
+    async def _request_manual_solution(self) -> Optional[str]:
+        """Send the CAPTCHA image to Telegram and wait for the user to reply via the scheduler bot."""
+        if self.telegram is None:
+            print("[CAPTCHA] No Telegram notifier — cannot request manual solve.")
+            return None
+
+        image_bytes = await self._screenshot_captcha()
+        if image_bytes is None:
+            print("[CAPTCHA] Could not capture captcha image for manual solve.")
+            return None
+
+        # Mark captcha as pending in Gist so the scheduler bot forwards the reply.
+        if self.config_manager is not None:
+            try:
+                self.config_manager.set_captcha_pending(True)
+            except Exception as exc:
+                print(f"[CAPTCHA] Could not set captcha_pending in Gist: {exc}")
+
+        sent = await self.telegram.send_photo(
+            image_bytes,
+            caption=(
+                "\U0001f510 *Manual CAPTCHA required*\n"
+                "Gemini could not solve the captcha after 2 attempts.\n"
+                "Please *reply with the code* shown in this image.\n"
+                "_You have 5 minutes._"
+            ),
+        )
+        if not sent:
+            print("[CAPTCHA] Failed to send captcha image to Telegram.")
+            if self.config_manager is not None:
+                try:
+                    self.config_manager.clear_captcha_state()
+                except Exception:
+                    pass
+            return None
+
+        print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
+
+        # Poll Gist every 5 seconds for up to 5 minutes.
+        solution: Optional[str] = None
+        timeout_seconds = 300
+        poll_interval = 5
+        for _ in range(timeout_seconds // poll_interval):
+            if self.config_manager is not None:
+                try:
+                    reply = self.config_manager.get_captcha_reply()
+                    if reply:
+                        solution = re.sub(r"[^A-Za-z0-9]", "", reply).strip() or None
+                        if solution:
+                            print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
+                            break
+                except Exception as exc:
+                    print(f"[CAPTCHA] Error polling Gist for captcha reply: {exc}")
+            await asyncio.sleep(poll_interval)
+
+        if self.config_manager is not None:
+            try:
+                self.config_manager.clear_captcha_state()
+            except Exception:
+                pass
+
+        if not solution:
+            print("[CAPTCHA] Timed out waiting for manual captcha reply.")
+            await self.telegram.send(
+                "\u23f3 *CAPTCHA manual input timed out.*\n"
+                "No reply received within 5 minutes. The booking attempt has been abandoned."
+            )
+
         return solution
 
     async def enter_solution(self, solution: str) -> bool:
@@ -339,8 +423,11 @@ class CaptchaHandler:
         except Exception:
             pass
 
-    async def solve_with_retry(self, max_attempts: int = 5) -> bool:
+    async def solve_with_retry(self, max_attempts: int = 3) -> bool:
         last_error: Optional[Exception] = None
+        use_manual_on_last = (
+            self.telegram is not None and self.config_manager is not None
+        )
 
         for attempt in range(1, max_attempts + 1):
             print(f"[CAPTCHA] Solve attempt {attempt}/{max_attempts}")
@@ -348,10 +435,21 @@ class CaptchaHandler:
             if attempt > 1:
                 await self.reload_captcha_image()
 
+            is_last = attempt == max_attempts
             try:
-                solution = await self.solve()
-                if solution is None:
-                    raise CaptchaAutomationError("Captcha image was not available for solving.")
+                if is_last and use_manual_on_last:
+                    print("[CAPTCHA] Last attempt — requesting manual solve via Telegram.")
+                    solution = await self._request_manual_solution()
+                    if solution is None:
+                        raise CaptchaAutomationError("No manual captcha solution received.")
+                    entered = await _fill_captcha_input(self.page, solution)
+                    if not entered:
+                        raise CaptchaAutomationError("CAPTCHA input field was not found.")
+                    print(f"[CAPTCHA] Manual solution entered: {solution}")
+                else:
+                    solution = await self.solve()
+                    if solution is None:
+                        raise CaptchaAutomationError("Captcha image was not available for solving.")
 
                 if not await self.click_aktivieren():
                     raise CaptchaAutomationError("Aktivieren button was not clickable.")
@@ -360,7 +458,7 @@ class CaptchaHandler:
                     print("[CAPTCHA] Captcha accepted.")
                     return True
 
-                last_error = CaptchaAutomationError("Gemini produced an incorrect CAPTCHA answer.")
+                last_error = CaptchaAutomationError("CAPTCHA answer was incorrect.")
                 print(f"[CAPTCHA] Incorrect captcha answer on attempt {attempt}.")
             except CaptchaAutomationError as exc:
                 last_error = exc

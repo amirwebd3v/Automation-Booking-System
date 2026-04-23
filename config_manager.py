@@ -58,6 +58,24 @@ class ConfigManager:
         self._state["interval_minutes"] = max(5, minutes)  # Minimum 5 min (default 10)
         self._save_state()
 
+    def set_captcha_pending(self, pending: bool) -> None:
+        """Signal the scheduler bot that a CAPTCHA is waiting for manual input."""
+        self._state["captcha_pending"] = pending
+        if not pending:
+            self._state.pop("captcha_reply", None)
+        self._save_state()
+
+    def get_captcha_reply(self) -> "str | None":
+        """Reload Gist and return the captcha reply written by the scheduler bot."""
+        self._state = self._load_state()
+        return self._state.get("captcha_reply")
+
+    def clear_captcha_state(self) -> None:
+        """Remove captcha_pending and captcha_reply from Gist."""
+        self._state.pop("captcha_pending", None)
+        self._state.pop("captcha_reply", None)
+        self._save_state()
+
     # ── Gist persistence ──────────────────────────────────────────────────────
 
     def _load_state(self) -> dict:

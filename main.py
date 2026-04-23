@@ -96,7 +96,7 @@ async def main():
         should_book = engine.should_book(remaining_gb)
         booking_success = None
         if should_book:
-            booker = BookingModule(page, telegram)
+            booker = BookingModule(page, telegram, config)
             booking_success = await booker.book_2gb_packet()
 
         await telegram.send(
@@ -113,7 +113,7 @@ async def main():
         print(f"[CAPTCHA] {e}")
         await _send_error_alert(
             telegram,
-            f"❌ *Gemini failed to solve the CAPTCHA after 3 attempts.*\n`{str(e)}`",
+            f"\u274c *CAPTCHA could not be solved after 3 attempts.*\n`{str(e)}`",
             page,
         )
     except Exception as e:
