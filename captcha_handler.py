@@ -143,12 +143,39 @@ async def _wait_for_image_load(page: Page, selector: str, timeout_ms: int = 10_0
     try:
         await page.wait_for_function(
             "(sel) => { const el = document.querySelector(sel); "
-            "return !!el && el.complete && el.naturalWidth > 0; }",
+            "return !!el && el.complete && el.naturalWidth > 0 && el.naturalHeight > 0; }",
             selector,
             timeout=timeout_ms,
         )
+        # Brief pause so the browser has time to paint the decoded pixels before
+        # we take a screenshot.
+        await asyncio.sleep(0.15)
     except Exception:
-        pass  # Proceed anyway — the screenshot may still be usable
+        pass  # Proceed anyway — direct fetch will be attempted first
+
+
+async def _fetch_captcha_image_directly(page: Page, selector: str) -> Optional[bytes]:
+    """Fetch captcha image bytes via the browser's HTTP session rather than a DOM screenshot.
+
+    Using ``page.request.get()`` shares the browser context's cookies so the
+    server returns exactly the image it will validate against.  This avoids the
+    blank/white image artefact that can occur when Playwright screenshots a
+    ``<img>`` whose pixels haven't been painted yet.
+    """
+    try:
+        src: Optional[str] = await page.locator(selector).first.get_attribute("src")
+        if not src:
+            return None
+        # Resolve relative URLs against the page's base URI.
+        abs_url: str = await page.evaluate("(s) => new URL(s, document.baseURI).href", src)
+        response = await page.request.get(abs_url)
+        if response.ok:
+            body = await response.body()
+            if body:
+                return body
+    except Exception as exc:
+        print(f"[CAPTCHA] Direct captcha image fetch failed: {exc}")
+    return None
 
 
 async def _extract_gemini_text(image_b64: str) -> str:
@@ -198,20 +225,31 @@ async def solve_captcha_with_gemini(page: Page, captcha_element_selector: str) -
 
     Returns a ``(solution, screenshot_bytes)`` tuple so callers can forward the
     exact image that Gemini saw without taking a second, potentially stale screenshot.
+
+    Image acquisition strategy (in order):
+    1. Direct HTTP fetch via ``page.request`` — shares the browser session cookies,
+       guarantees the server-side image, and avoids blank/white rendering artefacts.
+    2. Element screenshot fallback — used only when the HTTP fetch fails.
     """
     captcha_element = page.locator(captcha_element_selector).first
     await captcha_element.wait_for(state="visible", timeout=10_000)
-    await _wait_for_image_load(page, captcha_element_selector)
 
-    screenshot_bytes = await captcha_element.screenshot(type="png")
-    image_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+    # Preferred: fetch the image bytes directly from the server.
+    image_bytes = await _fetch_captcha_image_directly(page, captcha_element_selector)
+
+    if image_bytes is None:
+        # Fallback: wait for browser render and screenshot the element.
+        await _wait_for_image_load(page, captcha_element_selector)
+        image_bytes = await captcha_element.screenshot(type="png")
+
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     solution = await _extract_gemini_text(image_b64)
 
     entered = await _fill_captcha_input(page, solution)
     if not entered:
         raise CaptchaAutomationError("CAPTCHA input field was not found.")
 
-    return solution, screenshot_bytes
+    return solution, image_bytes
 
 
 class CaptchaHandler:
@@ -252,10 +290,15 @@ class CaptchaHandler:
         return solution, screenshot_bytes
 
     async def _screenshot_captcha(self) -> Optional[bytes]:
-        """Return raw PNG bytes of the CAPTCHA <img> element only."""
+        """Return captcha image bytes — direct HTTP fetch first, element screenshot as fallback."""
         selector = await self.get_captcha_selector()
         if selector is None:
             return None
+        # Preferred: fetch directly from the server to avoid blank rendering artefacts.
+        image_bytes = await _fetch_captcha_image_directly(self.page, selector)
+        if image_bytes:
+            return image_bytes
+        # Fallback: element screenshot.
         try:
             captcha_element = self.page.locator(selector).first
             await _wait_for_image_load(self.page, selector)
@@ -274,26 +317,35 @@ class CaptchaHandler:
         except Exception:
             return None
 
-    async def _request_manual_solution(self) -> Optional[str]:
-        """Send the CAPTCHA image to Telegram and wait for the user to reply directly.
+    async def _solve_manually_until_accepted(self) -> None:
+        """Infinite manual-solve loop: send captcha image to Telegram, submit answer, repeat.
 
-        After the user replies, the captcha src on the page is compared against the
-        src that was screenshotted.  If they differ the captcha refreshed during the
-        wait — the new image is immediately sent and the user is asked once more so
-        that the submitted code always matches what the server is currently showing.
+        The loop only exits when:
+        - The submitted code is accepted by the site, OR
+        - The user does not reply within ``MANUAL_CAPTCHA_TIMEOUT_SECONDS`` (raises error).
+
+        Staleness is handled at two points:
+        1. *After receiving the reply* — the captcha ``src`` is compared with the one
+           that was screenshotted before sending; if they differ the image is re-sent.
+        2. *After filling the input* — the src is checked once more before clicking
+           Aktivieren; if it changed the loop continues immediately with a fresh image.
         """
         if self.telegram is None:
-            print("[CAPTCHA] No Telegram notifier — cannot request manual solve.")
-            return None
+            raise CaptchaAutomationError("No Telegram notifier — cannot request manual solve.")
 
-        async def _ask_once(first: bool) -> Optional[str]:
+        round_number = 0
+        while True:
+            round_number += 1
+            print(f"[CAPTCHA] Manual solve round {round_number}")
+
+            # --- 1. Capture the captcha image and record its src ---
             src_before = await self._get_captcha_src()
             image_bytes = await self._screenshot_captcha()
             if image_bytes is None:
-                print("[CAPTCHA] Could not capture captcha image for manual solve.")
-                return None
+                raise CaptchaAutomationError("Could not capture captcha image for manual solve.")
 
-            if first:
+            # --- 2. Send image to Telegram and wait for user's reply ---
+            if round_number == 1:
                 await self.telegram.send(
                     "\U0001f6a8 *ACTION REQUIRED — Manual CAPTCHA*\n"
                     "Gemini could not solve the captcha.\n"
@@ -301,8 +353,8 @@ class CaptchaHandler:
                 )
             else:
                 await self.telegram.send(
-                    "\U000026a0\ufe0f *Captcha refreshed — new image sent.*\n"
-                    "Please reply with the code from the *new* image below."
+                    "\u26a0\ufe0f *New captcha image — please try again.*\n"
+                    "Reply with the code shown in the image below."
                 )
 
             sent = await self.telegram.send_photo(
@@ -314,8 +366,7 @@ class CaptchaHandler:
                 ),
             )
             if not sent:
-                print("[CAPTCHA] Failed to send captcha image to Telegram.")
-                return None
+                raise CaptchaAutomationError("Failed to send captcha image to Telegram.")
 
             print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
 
@@ -330,39 +381,46 @@ class CaptchaHandler:
                     "\u23f3 *CAPTCHA manual input timed out.*\n"
                     "No reply received within 5 minutes. The booking attempt has been abandoned."
                 )
-                return None
+                raise CaptchaAutomationError("Manual captcha timed out — no reply from user.")
 
-            # Check whether the captcha on the page changed while we were waiting.
-            src_after = await self._get_captcha_src()
-            if src_before and src_after and src_before != src_after:
-                print("[CAPTCHA] Captcha refreshed during manual wait — re-asking user.")
-                return None  # Signal caller to retry with the fresh captcha
+            # --- 3. Staleness check #1: did the captcha change while we waited? ---
+            src_after_reply = await self._get_captcha_src()
+            if src_before and src_after_reply and src_before != src_after_reply:
+                print("[CAPTCHA] Captcha refreshed during Telegram wait — sending new image.")
+                await self.reload_captcha_image()
+                continue  # Restart loop with the new captcha
 
-            solution = re.sub(r"[^A-Za-z0-9]", "", raw_reply).strip() or None
-            if solution:
-                print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
-            return solution
+            solution = re.sub(r"[^A-Za-z0-9]", "", raw_reply).strip()
+            if not solution:
+                print("[CAPTCHA] Empty reply received — asking again.")
+                continue
 
-        solution = await _ask_once(first=True)
-        if solution is None:
-            # Either timed out or the captcha refreshed; try once more with the
-            # current (fresh) captcha image.
-            solution = await _ask_once(first=False)
+            print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
 
-        return solution
+            # --- 4. Fill input field ---
+            entered = await _fill_captcha_input(self.page, solution)
+            if not entered:
+                raise CaptchaAutomationError("CAPTCHA input field was not found.")
+            print(f"[CAPTCHA] Manual solution entered: {solution}")
 
-    async def _enter_manual_solution(self, reason: str) -> None:
-        """Request a manual CAPTCHA solve, then enter it into the form field."""
-        print(reason)
-        solution = await self._request_manual_solution()
-        if solution is None:
-            raise CaptchaAutomationError("No manual captcha solution received.")
+            # --- 5. Staleness check #2: did the captcha change after fill()? ---
+            src_after_fill = await self._get_captcha_src()
+            if src_before and src_after_fill and src_before != src_after_fill:
+                print("[CAPTCHA] Captcha refreshed after fill — sending new image.")
+                await self.reload_captcha_image()
+                continue
 
-        entered = await _fill_captcha_input(self.page, solution)
-        if not entered:
-            raise CaptchaAutomationError("CAPTCHA input field was not found.")
+            # --- 6. Submit ---
+            if not await self.click_aktivieren():
+                raise CaptchaAutomationError("Aktivieren button was not clickable.")
 
-        print(f"[CAPTCHA] Manual solution entered: {solution}")
+            if not await self.is_captcha_error():
+                print("[CAPTCHA] Manual captcha accepted.")
+                return  # Done!
+
+            print("[CAPTCHA] Manual captcha rejected — reloading and trying again.")
+            await self.reload_captcha_image()
+            # Loop continues
 
     async def enter_solution(self, solution: str) -> bool:
         entered = await _fill_captcha_input(self.page, solution)
@@ -492,47 +550,35 @@ class CaptchaHandler:
         except Exception:
             pass
 
-    async def solve_with_retry(self, max_attempts: int = 3) -> bool:
-        last_error: Optional[Exception] = None
-        use_manual_on_last = self.telegram is not None
+    async def solve_with_retry(self, max_gemini_attempts: int = 2) -> bool:
+        """Solve the captcha with an unlimited overall retry budget.
 
-        for attempt in range(1, max_attempts + 1):
-            print(f"[CAPTCHA] Solve attempt {attempt}/{max_attempts}")
+        Phase 1 — Gemini auto-solve (up to *max_gemini_attempts* attempts).
+            Each Gemini attempt reloads the captcha first (except the very first),
+            lets Gemini solve it, notifies Telegram with the image + answer, then
+            submits.  On success the function returns immediately.
+
+        Phase 2 — Manual solve via Telegram (unlimited rounds).
+            If Gemini exhausts its budget the workflow hands off to
+            ``_solve_manually_until_accepted`` which loops indefinitely:
+            sends the current captcha image to Telegram, waits for the user's
+            reply, verifies the captcha hasn't refreshed at two check-points
+            (after reply and after fill), submits, and repeats if rejected.
+            The only exit from Phase 2 is success or a 5-minute user timeout.
+        """
+        # ── Phase 1: Gemini ──────────────────────────────────────────────────
+        for attempt in range(1, max_gemini_attempts + 1):
+            print(f"[CAPTCHA] Gemini attempt {attempt}/{max_gemini_attempts}")
 
             if attempt > 1:
                 await self.reload_captcha_image()
 
-            is_last = attempt == max_attempts
             try:
-                used_manual_solution = False
-                if is_last and use_manual_on_last:
-                    used_manual_solution = True
-                    await self._enter_manual_solution(
-                        "[CAPTCHA] Last attempt — requesting manual solve via Telegram."
-                    )
-                else:
-                    solution: Optional[str] = None
-                    captcha_screenshot: Optional[bytes] = None
-                    try:
-                        solution, captcha_screenshot = await self._solve_with_screenshot()
-                    except Exception as exc:
-                        if use_manual_on_last:
-                            print(f"[CAPTCHA] Gemini solve failed: {exc}")
-                            used_manual_solution = True
-                            await self._enter_manual_solution(
-                                "[CAPTCHA] Falling back to manual solve via Telegram."
-                            )
-                        else:
-                            if isinstance(exc, CaptchaAutomationError):
-                                raise
-                            raise CaptchaAutomationError(
-                                f"Gemini solve failed: {exc}"
-                            ) from exc
-                    if solution is None and not used_manual_solution:
-                        raise CaptchaAutomationError("Captcha image was not available for solving.")
+                solution, captcha_screenshot = await self._solve_with_screenshot()
+                if solution is None:
+                    raise CaptchaAutomationError("Captcha image was not available for solving.")
 
-                    if solution is not None:
-                        await self._notify_gemini_answer(solution, captcha_screenshot)
+                await self._notify_gemini_answer(solution, captcha_screenshot)
 
                 if not await self.click_aktivieren():
                     raise CaptchaAutomationError("Aktivieren button was not clickable.")
@@ -541,12 +587,19 @@ class CaptchaHandler:
                     print("[CAPTCHA] Captcha accepted.")
                     return True
 
-                last_error = CaptchaAutomationError("CAPTCHA answer was incorrect.")
-                print(f"[CAPTCHA] Incorrect captcha answer on attempt {attempt}.")
-            except CaptchaAutomationError as exc:
-                last_error = exc
-                print(f"[CAPTCHA] Attempt {attempt} failed: {exc}")
+                print(f"[CAPTCHA] Incorrect captcha answer on Gemini attempt {attempt}.")
 
-        raise CaptchaSolveError(
-            f"Gemini failed to solve the captcha after {max_attempts} attempts."
-        ) from last_error
+            except CaptchaAutomationError as exc:
+                print(f"[CAPTCHA] Gemini attempt {attempt} failed: {exc}")
+
+        # ── Phase 2: Manual (unlimited) ───────────────────────────────────────
+        if self.telegram is None:
+            raise CaptchaSolveError(
+                f"Gemini failed after {max_gemini_attempts} attempts and no Telegram is configured."
+            )
+
+        print("[CAPTCHA] Gemini exhausted — switching to unlimited manual solve via Telegram.")
+        await self.reload_captcha_image()
+        await self._solve_manually_until_accepted()
+        return True
+
