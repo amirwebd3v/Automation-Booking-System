@@ -189,18 +189,7 @@ async def _fill_captcha_input(page: Page, solution: str) -> bool:
         return False
 
     field = page.locator(input_selector).first
-    await field.click()
     await field.fill(solution)
-
-    # Verify the value was accepted; fall back to simulated keypresses if not.
-    try:
-        actual = await field.input_value()
-        if actual != solution:
-            await field.triple_click()
-            await field.press_sequentially(solution, delay=50)
-    except Exception:
-        pass
-
     return True
 
 
@@ -382,6 +371,22 @@ class CaptchaHandler:
         print("[CAPTCHA] Could not reload captcha image.")
         return False
 
+    async def _notify_gemini_answer(self, solution: str) -> None:
+        """Send the current captcha image and Gemini's answer to Telegram before submitting."""
+        if self.telegram is None:
+            return
+        image_bytes = await self._screenshot_captcha()
+        if image_bytes is None:
+            await self.telegram.send(f"\U0001f916 *Gemini CAPTCHA answer:* `{solution}`")
+            return
+        await self.telegram.send_photo(
+            image_bytes,
+            caption=(
+                f"\U0001f916 *Gemini answered:* `{solution}`\n"
+                "_Check if this matches the image above._"
+            ),
+        )
+
     async def click_aktivieren(self) -> bool:
         modal = self.page.locator(MODAL_SELECTOR).first
         try:
@@ -471,9 +476,9 @@ class CaptchaHandler:
                     if solution is None and not used_manual_solution:
                         raise CaptchaAutomationError("Captcha image was not available for solving.")
 
-                # Small settling delay so the browser registers the filled value
-                # before the form is submitted via the Aktivieren click.
-                await asyncio.sleep(0.3)
+                    if solution is not None:
+                        await self._notify_gemini_answer(solution)
+
                 if not await self.click_aktivieren():
                     raise CaptchaAutomationError("Aktivieren button was not clickable.")
 
