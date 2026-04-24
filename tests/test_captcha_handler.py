@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -57,14 +57,34 @@ class FakeLocator:
         return self.selector_children.get(selector, FakeLocator(visible=False, count_value=0))
 
 
+class FakeResponse:
+    def __init__(self, body=b"", ok=True):
+        self._body = body
+        self.ok = ok
+
+    async def body(self):
+        return self._body
+
+
+class FakeAPIRequestContext:
+    """Simulates page.request — returns empty/failed by default so tests fall back to screenshot."""
+
+    def __init__(self, ok=False):
+        self._ok = ok
+
+    async def get(self, url):
+        return FakeResponse(body=b"", ok=self._ok)
+
+
 class FakePage:
-    def __init__(self, locators=None, text_locator=None, content_html=""):
+    def __init__(self, locators=None, text_locator=None, content_html="", request_ok=False):
         self.locators = locators or {}
         self.text_locator = text_locator or FakeLocator(visible=False, count_value=0)
         self.content_html = content_html
         self.wait_for_selector_calls = []
         self.load_state_calls = []
         self.wait_for_function_calls = []
+        self.request = FakeAPIRequestContext(ok=request_ok)
 
     def locator(self, selector):
         return self.locators.get(selector, FakeLocator(visible=False, count_value=0))
@@ -84,6 +104,10 @@ class FakePage:
     async def content(self):
         return self.content_html
 
+    async def evaluate(self, expression, arg=None):
+        # Return a plausible absolute URL for any relative src passed in.
+        return f"https://example.com/{arg}" if arg else "https://example.com/"
+
 
 @pytest.mark.asyncio
 async def test_solve_captcha_with_gemini_screenshots_and_fills_input(monkeypatch):
@@ -102,12 +126,13 @@ async def test_solve_captcha_with_gemini_screenshots_and_fills_input(monkeypatch
 
     monkeypatch.setattr(captcha_module, "_extract_gemini_text", fake_extract)
 
-    result = await captcha_module.solve_captcha_with_gemini(
+    solution, image_bytes = await captcha_module.solve_captcha_with_gemini(
         page,
         captcha_module.CAPTCHA_SELECTORS[0],
     )
 
-    assert result == "A1B2"
+    assert solution == "A1B2"
+    assert image_bytes == b"captcha"
     assert input_locator.filled == "A1B2"
 
 
@@ -127,56 +152,76 @@ async def test_click_aktivieren_uses_modal_text_locators(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_solve_with_retry_reloads_and_succeeds(monkeypatch):
+async def test_solve_with_retry_gemini_succeeds_on_second_attempt(monkeypatch):
+    """Gemini gets the answer wrong on attempt 1, right on attempt 2."""
     handler = captcha_module.CaptchaHandler(page=object())
-    solve = AsyncMock(side_effect=["WRONG", "RIGHT"])
+
+    _solve_with_screenshot = AsyncMock(return_value=("SOLUTION", b"img"))
+    _notify_gemini_answer = AsyncMock()
     click_aktivieren = AsyncMock(return_value=True)
     is_captcha_error = AsyncMock(side_effect=[True, False])
     reload_captcha_image = AsyncMock(return_value=True)
 
-    monkeypatch.setattr(handler, "solve", solve)
+    monkeypatch.setattr(handler, "_solve_with_screenshot", _solve_with_screenshot)
+    monkeypatch.setattr(handler, "_notify_gemini_answer", _notify_gemini_answer)
     monkeypatch.setattr(handler, "click_aktivieren", click_aktivieren)
     monkeypatch.setattr(handler, "is_captcha_error", is_captcha_error)
     monkeypatch.setattr(handler, "reload_captcha_image", reload_captcha_image)
 
-    assert await handler.solve_with_retry(max_attempts=3) is True
-    assert solve.await_count == 2
+    assert await handler.solve_with_retry(max_gemini_attempts=2) is True
+    assert _solve_with_screenshot.await_count == 2
     reload_captcha_image.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_solve_with_retry_raises_after_retry_budget(monkeypatch):
-    handler = captcha_module.CaptchaHandler(page=object())
-    monkeypatch.setattr(handler, "solve", AsyncMock(return_value="WRONG"))
+async def test_solve_with_retry_falls_back_to_manual_when_gemini_exhausted(monkeypatch):
+    """Gemini always returns wrong answer — manual loop must be reached."""
+    handler = captcha_module.CaptchaHandler(page=object(), telegram=object())
+
+    monkeypatch.setattr(handler, "_solve_with_screenshot", AsyncMock(return_value=("X", b"img")))
+    monkeypatch.setattr(handler, "_notify_gemini_answer", AsyncMock())
     monkeypatch.setattr(handler, "click_aktivieren", AsyncMock(return_value=True))
     monkeypatch.setattr(handler, "is_captcha_error", AsyncMock(return_value=True))
-    reload_captcha_image = AsyncMock(return_value=True)
-    monkeypatch.setattr(handler, "reload_captcha_image", reload_captcha_image)
+    monkeypatch.setattr(handler, "reload_captcha_image", AsyncMock(return_value=True))
 
-    with pytest.raises(captcha_module.CaptchaSolveError):
-        await handler.solve_with_retry(max_attempts=3)
+    solve_manually = AsyncMock()
+    monkeypatch.setattr(handler, "_solve_manually_until_accepted", solve_manually)
 
-    assert reload_captcha_image.await_count == 2
+    assert await handler.solve_with_retry(max_gemini_attempts=2) is True
+    solve_manually.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_solve_with_retry_falls_back_to_manual_when_gemini_errors(monkeypatch):
-    page = object()
-    handler = captcha_module.CaptchaHandler(
-        page=page,
-        telegram=object(),
-        config_manager=object(),
-    )
-    monkeypatch.setattr(handler, "solve", AsyncMock(side_effect=RuntimeError("quota exceeded")))
+    """Any exception from Gemini must immediately fall through to manual."""
+    handler = captcha_module.CaptchaHandler(page=object(), telegram=object())
+
     monkeypatch.setattr(
         handler,
-        "_request_manual_solution",
-        AsyncMock(return_value="AB12C"),
+        "_solve_with_screenshot",
+        AsyncMock(side_effect=RuntimeError("quota exceeded")),
     )
-    monkeypatch.setattr(handler, "click_aktivieren", AsyncMock(return_value=True))
-    monkeypatch.setattr(handler, "is_captcha_error", AsyncMock(return_value=False))
-    fill_input = AsyncMock(return_value=True)
-    monkeypatch.setattr(captcha_module, "_fill_captcha_input", fill_input)
+    monkeypatch.setattr(handler, "reload_captcha_image", AsyncMock(return_value=True))
 
-    assert await handler.solve_with_retry(max_attempts=3) is True
-    fill_input.assert_awaited_once_with(page, "AB12C")
+    solve_manually = AsyncMock()
+    monkeypatch.setattr(handler, "_solve_manually_until_accepted", solve_manually)
+
+    assert await handler.solve_with_retry(max_gemini_attempts=2) is True
+    # Gemini broke on attempt 1 — manual must have been called exactly once.
+    solve_manually.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_solve_with_retry_raises_without_telegram_when_gemini_fails(monkeypatch):
+    """Without Telegram, failing Gemini must raise CaptchaSolveError."""
+    handler = captcha_module.CaptchaHandler(page=object(), telegram=None)
+
+    monkeypatch.setattr(
+        handler,
+        "_solve_with_screenshot",
+        AsyncMock(side_effect=RuntimeError("no quota")),
+    )
+    monkeypatch.setattr(handler, "reload_captcha_image", AsyncMock(return_value=True))
+
+    with pytest.raises(captcha_module.CaptchaSolveError):
+        await handler.solve_with_retry(max_gemini_attempts=2)
