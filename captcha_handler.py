@@ -193,8 +193,12 @@ async def _fill_captcha_input(page: Page, solution: str) -> bool:
     return True
 
 
-async def solve_captcha_with_gemini(page: Page, captcha_element_selector: str) -> str:
-    """Capture a CAPTCHA image, solve it with Gemini, and fill the input field."""
+async def solve_captcha_with_gemini(page: Page, captcha_element_selector: str) -> tuple[str, bytes]:
+    """Capture a CAPTCHA image, solve it with Gemini, and fill the input field.
+
+    Returns a ``(solution, screenshot_bytes)`` tuple so callers can forward the
+    exact image that Gemini saw without taking a second, potentially stale screenshot.
+    """
     captcha_element = page.locator(captcha_element_selector).first
     await captcha_element.wait_for(state="visible", timeout=10_000)
     await _wait_for_image_load(page, captcha_element_selector)
@@ -207,7 +211,7 @@ async def solve_captcha_with_gemini(page: Page, captcha_element_selector: str) -
     if not entered:
         raise CaptchaAutomationError("CAPTCHA input field was not found.")
 
-    return solution
+    return solution, screenshot_bytes
 
 
 class CaptchaHandler:
@@ -232,9 +236,20 @@ class CaptchaHandler:
             print("[CAPTCHA] Could not find a visible captcha image.")
             return None
 
-        solution = await solve_captcha_with_gemini(self.page, selector)
+        solution, _ = await solve_captcha_with_gemini(self.page, selector)
         print(f"[CAPTCHA] Gemini solved captcha as: {solution}")
         return solution
+
+    async def _solve_with_screenshot(self) -> tuple[Optional[str], Optional[bytes]]:
+        """Like solve(), but also returns the screenshot bytes Gemini actually saw."""
+        selector = await self.get_captcha_selector()
+        if selector is None:
+            print("[CAPTCHA] Could not find a visible captcha image.")
+            return None, None
+
+        solution, screenshot_bytes = await solve_captcha_with_gemini(self.page, selector)
+        print(f"[CAPTCHA] Gemini solved captcha as: {solution}")
+        return solution, screenshot_bytes
 
     async def _screenshot_captcha(self) -> Optional[bytes]:
         """Return raw PNG bytes of the CAPTCHA <img> element only."""
@@ -249,56 +264,91 @@ class CaptchaHandler:
             print(f"[CAPTCHA] Could not screenshot captcha element: {exc}")
             return None
 
+    async def _get_captcha_src(self) -> Optional[str]:
+        """Return the current ``src`` attribute of the captcha <img> element."""
+        selector = await self.get_captcha_selector()
+        if selector is None:
+            return None
+        try:
+            return await self.page.locator(selector).first.get_attribute("src")
+        except Exception:
+            return None
+
     async def _request_manual_solution(self) -> Optional[str]:
-        """Send the CAPTCHA image to Telegram and wait for the user to reply directly."""
+        """Send the CAPTCHA image to Telegram and wait for the user to reply directly.
+
+        After the user replies, the captcha src on the page is compared against the
+        src that was screenshotted.  If they differ the captcha refreshed during the
+        wait — the new image is immediately sent and the user is asked once more so
+        that the submitted code always matches what the server is currently showing.
+        """
         if self.telegram is None:
             print("[CAPTCHA] No Telegram notifier — cannot request manual solve.")
             return None
 
-        image_bytes = await self._screenshot_captcha()
-        if image_bytes is None:
-            print("[CAPTCHA] Could not capture captcha image for manual solve.")
-            return None
+        async def _ask_once(first: bool) -> Optional[str]:
+            src_before = await self._get_captcha_src()
+            image_bytes = await self._screenshot_captcha()
+            if image_bytes is None:
+                print("[CAPTCHA] Could not capture captcha image for manual solve.")
+                return None
 
-        # Send a text alert first — text messages trigger push notifications more
-        # reliably than photos, ensuring the user sees the request immediately.
-        await self.telegram.send(
-            "\U0001f6a8 *ACTION REQUIRED — Manual CAPTCHA*\n"
-            "Gemini could not solve the captcha.\n"
-            "The captcha image follows. *Reply with the code within 5 minutes.*"
-        )
+            if first:
+                await self.telegram.send(
+                    "\U0001f6a8 *ACTION REQUIRED — Manual CAPTCHA*\n"
+                    "Gemini could not solve the captcha.\n"
+                    "The captcha image follows. *Reply with the code within 5 minutes.*"
+                )
+            else:
+                await self.telegram.send(
+                    "\U000026a0\ufe0f *Captcha refreshed — new image sent.*\n"
+                    "Please reply with the code from the *new* image below."
+                )
 
-        sent = await self.telegram.send_photo(
-            image_bytes,
-            caption=(
-                "\U0001f510 *Manual CAPTCHA required*\n"
-                "Please *reply to this message* with the code shown above.\n"
-                "_You have 5 minutes._"
-            ),
-        )
-        if not sent:
-            print("[CAPTCHA] Failed to send captcha image to Telegram.")
-            return None
-
-        print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
-
-        # Poll Telegram's getUpdates directly — no external bot required.
-        raw_reply = await self.telegram.wait_for_reply(
-            timeout_seconds=MANUAL_CAPTCHA_TIMEOUT_SECONDS,
-            poll_interval=MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS,
-        )
-
-        if not raw_reply:
-            print("[CAPTCHA] Timed out waiting for manual captcha reply.")
-            await self.telegram.send(
-                "\u23f3 *CAPTCHA manual input timed out.*\n"
-                "No reply received within 5 minutes. The booking attempt has been abandoned."
+            sent = await self.telegram.send_photo(
+                image_bytes,
+                caption=(
+                    "\U0001f510 *Manual CAPTCHA required*\n"
+                    "Please *reply to this message* with the code shown above.\n"
+                    "_You have 5 minutes._"
+                ),
             )
-            return None
+            if not sent:
+                print("[CAPTCHA] Failed to send captcha image to Telegram.")
+                return None
 
-        solution = re.sub(r"[^A-Za-z0-9]", "", raw_reply).strip() or None
-        if solution:
-            print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
+            print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
+
+            raw_reply = await self.telegram.wait_for_reply(
+                timeout_seconds=MANUAL_CAPTCHA_TIMEOUT_SECONDS,
+                poll_interval=MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS,
+            )
+
+            if not raw_reply:
+                print("[CAPTCHA] Timed out waiting for manual captcha reply.")
+                await self.telegram.send(
+                    "\u23f3 *CAPTCHA manual input timed out.*\n"
+                    "No reply received within 5 minutes. The booking attempt has been abandoned."
+                )
+                return None
+
+            # Check whether the captcha on the page changed while we were waiting.
+            src_after = await self._get_captcha_src()
+            if src_before and src_after and src_before != src_after:
+                print("[CAPTCHA] Captcha refreshed during manual wait — re-asking user.")
+                return None  # Signal caller to retry with the fresh captcha
+
+            solution = re.sub(r"[^A-Za-z0-9]", "", raw_reply).strip() or None
+            if solution:
+                print(f"[CAPTCHA] Manual solution received from Telegram: {solution}")
+            return solution
+
+        solution = await _ask_once(first=True)
+        if solution is None:
+            # Either timed out or the captcha refreshed; try once more with the
+            # current (fresh) captcha image.
+            solution = await _ask_once(first=False)
+
         return solution
 
     async def _enter_manual_solution(self, reason: str) -> None:
@@ -371,16 +421,20 @@ class CaptchaHandler:
         print("[CAPTCHA] Could not reload captcha image.")
         return False
 
-    async def _notify_gemini_answer(self, solution: str) -> None:
-        """Send the current captcha image and Gemini's answer to Telegram before submitting."""
+    async def _notify_gemini_answer(self, solution: str, screenshot_bytes: Optional[bytes] = None) -> None:
+        """Send the captcha image Gemini saw and its answer to Telegram before submitting.
+
+        Pass *screenshot_bytes* captured at solve-time so this method never
+        re-screenshots — by the time we notify, the captcha image on the page
+        may already have been refreshed by the site's JS.
+        """
         if self.telegram is None:
             return
-        image_bytes = await self._screenshot_captcha()
-        if image_bytes is None:
+        if screenshot_bytes is None:
             await self.telegram.send(f"\U0001f916 *Gemini CAPTCHA answer:* `{solution}`")
             return
         await self.telegram.send_photo(
-            image_bytes,
+            screenshot_bytes,
             caption=(
                 f"\U0001f916 *Gemini answered:* `{solution}`\n"
                 "_Check if this matches the image above._"
@@ -458,8 +512,9 @@ class CaptchaHandler:
                     )
                 else:
                     solution: Optional[str] = None
+                    captcha_screenshot: Optional[bytes] = None
                     try:
-                        solution = await self.solve()
+                        solution, captcha_screenshot = await self._solve_with_screenshot()
                     except Exception as exc:
                         if use_manual_on_last:
                             print(f"[CAPTCHA] Gemini solve failed: {exc}")
@@ -477,7 +532,7 @@ class CaptchaHandler:
                         raise CaptchaAutomationError("Captcha image was not available for solving.")
 
                     if solution is not None:
-                        await self._notify_gemini_answer(solution)
+                        await self._notify_gemini_answer(solution, captcha_screenshot)
 
                 if not await self.click_aktivieren():
                     raise CaptchaAutomationError("Aktivieren button was not clickable.")
