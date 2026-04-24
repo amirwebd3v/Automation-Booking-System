@@ -168,7 +168,7 @@ async def test_solve_with_retry_gemini_succeeds_on_second_attempt(monkeypatch):
     monkeypatch.setattr(handler, "is_captcha_error", is_captcha_error)
     monkeypatch.setattr(handler, "reload_captcha_image", reload_captcha_image)
 
-    assert await handler.solve_with_retry(max_gemini_attempts=2) is True
+    assert await handler.solve_with_retry(max_attempts=2) is True
     assert _solve_with_screenshot.await_count == 2
     reload_captcha_image.assert_awaited_once()
 
@@ -187,7 +187,7 @@ async def test_solve_with_retry_falls_back_to_manual_when_gemini_exhausted(monke
     solve_manually = AsyncMock()
     monkeypatch.setattr(handler, "_solve_manually_until_accepted", solve_manually)
 
-    assert await handler.solve_with_retry(max_gemini_attempts=2) is True
+    assert await handler.solve_with_retry(max_attempts=2) is True
     solve_manually.assert_awaited_once()
 
 
@@ -206,7 +206,7 @@ async def test_solve_with_retry_falls_back_to_manual_when_gemini_errors(monkeypa
     solve_manually = AsyncMock()
     monkeypatch.setattr(handler, "_solve_manually_until_accepted", solve_manually)
 
-    assert await handler.solve_with_retry(max_gemini_attempts=2) is True
+    assert await handler.solve_with_retry(max_attempts=2) is True
     # Gemini broke on attempt 1 — manual must have been called exactly once.
     solve_manually.assert_awaited_once()
 
@@ -224,4 +224,4 @@ async def test_solve_with_retry_raises_without_telegram_when_gemini_fails(monkey
     monkeypatch.setattr(handler, "reload_captcha_image", AsyncMock(return_value=True))
 
     with pytest.raises(captcha_module.CaptchaSolveError):
-        await handler.solve_with_retry(max_gemini_attempts=2)
+        await handler.solve_with_retry(max_attempts=2)
