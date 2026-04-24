@@ -550,10 +550,10 @@ class CaptchaHandler:
         except Exception:
             pass
 
-    async def solve_with_retry(self, max_gemini_attempts: int = 2) -> bool:
+    async def solve_with_retry(self, max_attempts: int = 2) -> bool:
         """Solve the captcha with an unlimited overall retry budget.
 
-        Phase 1 — Gemini auto-solve (up to *max_gemini_attempts* attempts).
+        Phase 1 — Gemini auto-solve (up to *max_attempts* attempts).
             Each Gemini attempt reloads the captcha first (except the very first),
             lets Gemini solve it, notifies Telegram with the image + answer, then
             submits.  On success the function returns immediately.
@@ -569,12 +569,12 @@ class CaptchaHandler:
         """
         gemini_succeeded = False
 
-        if self.telegram is None and max_gemini_attempts == 0:
+        if self.telegram is None and max_attempts == 0:
             raise CaptchaSolveError("No Gemini attempts and no Telegram configured.")
 
         # ── Phase 1: Gemini ──────────────────────────────────────────────────
-        for attempt in range(1, max_gemini_attempts + 1):
-            print(f"[CAPTCHA] Gemini attempt {attempt}/{max_gemini_attempts}")
+        for attempt in range(1, max_attempts + 1):
+            print(f"[CAPTCHA] Gemini attempt {attempt}/{max_attempts}")
 
             if attempt > 1:
                 await self.reload_captcha_image()
