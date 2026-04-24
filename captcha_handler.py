@@ -557,15 +557,21 @@ class CaptchaHandler:
             Each Gemini attempt reloads the captcha first (except the very first),
             lets Gemini solve it, notifies Telegram with the image + answer, then
             submits.  On success the function returns immediately.
+            If Gemini fails for *any* reason (wrong answer, exception, config error,
+            image unavailable …) the loop ends early and Phase 2 takes over.
 
         Phase 2 — Manual solve via Telegram (unlimited rounds).
-            If Gemini exhausts its budget the workflow hands off to
-            ``_solve_manually_until_accepted`` which loops indefinitely:
-            sends the current captcha image to Telegram, waits for the user's
-            reply, verifies the captcha hasn't refreshed at two check-points
-            (after reply and after fill), submits, and repeats if rejected.
-            The only exit from Phase 2 is success or a 5-minute user timeout.
+            Always used as the fallback whenever Gemini doesn't succeed.
+            Loops indefinitely: sends the current captcha image to Telegram, waits
+            for the user's reply, verifies the captcha hasn't refreshed at two
+            check-points (after reply and after fill), submits, and repeats if
+            rejected.  The only exit is success or a 5-minute user timeout.
         """
+        gemini_succeeded = False
+
+        if self.telegram is None and max_gemini_attempts == 0:
+            raise CaptchaSolveError("No Gemini attempts and no Telegram configured.")
+
         # ── Phase 1: Gemini ──────────────────────────────────────────────────
         for attempt in range(1, max_gemini_attempts + 1):
             print(f"[CAPTCHA] Gemini attempt {attempt}/{max_gemini_attempts}")
@@ -576,30 +582,38 @@ class CaptchaHandler:
             try:
                 solution, captcha_screenshot = await self._solve_with_screenshot()
                 if solution is None:
-                    raise CaptchaAutomationError("Captcha image was not available for solving.")
+                    print(f"[CAPTCHA] Gemini attempt {attempt}: captcha image unavailable — falling back to manual.")
+                    break
 
                 await self._notify_gemini_answer(solution, captcha_screenshot)
 
                 if not await self.click_aktivieren():
-                    raise CaptchaAutomationError("Aktivieren button was not clickable.")
+                    print(f"[CAPTCHA] Gemini attempt {attempt}: Aktivieren not clickable — falling back to manual.")
+                    break
 
                 if not await self.is_captcha_error():
                     print("[CAPTCHA] Captcha accepted.")
+                    gemini_succeeded = True
                     return True
 
                 print(f"[CAPTCHA] Incorrect captcha answer on Gemini attempt {attempt}.")
 
-            except CaptchaAutomationError as exc:
-                print(f"[CAPTCHA] Gemini attempt {attempt} failed: {exc}")
+            except Exception as exc:
+                print(f"[CAPTCHA] Gemini attempt {attempt} failed ({type(exc).__name__}: {exc}) — falling back to manual.")
+                break
 
         # ── Phase 2: Manual (unlimited) ───────────────────────────────────────
+        if gemini_succeeded:
+            return True  # already returned above, but keeps the guard explicit
+
         if self.telegram is None:
             raise CaptchaSolveError(
-                f"Gemini failed after {max_gemini_attempts} attempts and no Telegram is configured."
+                "Gemini could not solve the captcha and no Telegram is configured for manual fallback."
             )
 
-        print("[CAPTCHA] Gemini exhausted — switching to unlimited manual solve via Telegram.")
+        print("[CAPTCHA] Switching to unlimited manual solve via Telegram.")
         await self.reload_captcha_image()
         await self._solve_manually_until_accepted()
         return True
+
 
