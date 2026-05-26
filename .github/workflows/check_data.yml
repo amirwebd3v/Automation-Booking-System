@@ -7,9 +7,7 @@
 name: sim24 Data Check & Auto-Book
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes (free, within GitHub)
-  workflow_dispatch:          # Allow manual trigger from GitHub UI
+  workflow_dispatch:  # Triggered by Cloudflare Worker cron (hourly) — see cloudflare_trigger/
 
 jobs:
   check-and-book:
