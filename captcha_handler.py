@@ -4,6 +4,7 @@ import asyncio
 import base64
 import os
 import re
+import time
 from typing import Optional
 
 from playwright.async_api import Page
@@ -329,9 +330,16 @@ class CaptchaHandler:
            that was screenshotted before sending; if they differ the image is re-sent.
         2. *After filling the input* — the src is checked once more before clicking
            Aktivieren; if it changed the loop continues immediately with a fresh image.
+
+        Reply delivery: the Cloudflare Worker webhook receives the user's Telegram message,
+        writes it to the shared Gist (captcha_reply), and clears captcha_pending. This method
+        polls the Gist instead of calling Telegram's getUpdates directly, so there is no
+        conflict with the webhook.
         """
         if self.telegram is None:
             raise CaptchaAutomationError("No Telegram notifier — cannot request manual solve.")
+        if self.config_manager is None:
+            raise CaptchaAutomationError("No config_manager — cannot poll Gist for captcha reply.")
 
         round_number = 0
         while True:
@@ -370,18 +378,28 @@ class CaptchaHandler:
 
             print("[CAPTCHA] Captcha image sent to Telegram. Waiting for manual reply (up to 5 min)...")
 
-            raw_reply = await self.telegram.wait_for_reply(
-                timeout_seconds=MANUAL_CAPTCHA_TIMEOUT_SECONDS,
-                poll_interval=MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS,
-            )
+            # Signal the Cloudflare Worker webhook that a captcha reply is expected.
+            # The Worker will write captcha_reply to the Gist when the user replies.
+            await asyncio.to_thread(self.config_manager.set_captcha_pending, True)
+
+            raw_reply: str | None = None
+            deadline = time.monotonic() + MANUAL_CAPTCHA_TIMEOUT_SECONDS
+            while time.monotonic() < deadline:
+                raw_reply = await asyncio.to_thread(self.config_manager.get_captcha_reply)
+                if raw_reply:
+                    break
+                await asyncio.sleep(MANUAL_CAPTCHA_POLL_INTERVAL_SECONDS)
 
             if not raw_reply:
                 print("[CAPTCHA] Timed out waiting for manual captcha reply.")
+                await asyncio.to_thread(self.config_manager.clear_captcha_state)
                 await self.telegram.send(
                     "\u23f3 *CAPTCHA manual input timed out.*\n"
                     "No reply received within 5 minutes. The booking attempt has been abandoned."
                 )
                 raise CaptchaAutomationError("Manual captcha timed out — no reply from user.")
+
+            await asyncio.to_thread(self.config_manager.clear_captcha_state)
 
             # --- 3. Staleness check #1: did the captcha change while we waited? ---
             src_after_reply = await self._get_captcha_src()
