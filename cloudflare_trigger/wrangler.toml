@@ -1,0 +1,9 @@
+name            = "sim24-workflow-trigger"
+main            = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Fires every hour at minute 0.
+# GitHub's built-in cron is unreliable during peak hours; this Worker triggers
+# workflow_dispatch instead, giving consistent execution timing.
+[triggers]
+crons = ["0 * * * *"]
