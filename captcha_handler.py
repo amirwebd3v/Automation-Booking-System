@@ -497,26 +497,6 @@ class CaptchaHandler:
         print("[CAPTCHA] Could not reload captcha image.")
         return False
 
-    async def _notify_gemini_answer(self, solution: str, screenshot_bytes: Optional[bytes] = None) -> None:
-        """Send the captcha image Gemini saw and its answer to Telegram before submitting.
-
-        Pass *screenshot_bytes* captured at solve-time so this method never
-        re-screenshots — by the time we notify, the captcha image on the page
-        may already have been refreshed by the site's JS.
-        """
-        if self.telegram is None:
-            return
-        if screenshot_bytes is None:
-            await self.telegram.send(f"\U0001f916 *Gemini CAPTCHA answer:* `{solution}`")
-            return
-        await self.telegram.send_photo(
-            screenshot_bytes,
-            caption=(
-                f"\U0001f916 *Gemini answered:* `{solution}`\n"
-                "_Check if this matches the image above._"
-            ),
-        )
-
     async def click_aktivieren(self) -> bool:
         modal = self.page.locator(MODAL_SELECTOR).first
         try:
@@ -598,12 +578,10 @@ class CaptchaHandler:
                 await self.reload_captcha_image()
 
             try:
-                solution, captcha_screenshot = await self._solve_with_screenshot()
+                solution, _ = await self._solve_with_screenshot()
                 if solution is None:
                     print(f"[CAPTCHA] Gemini attempt {attempt}: captcha image unavailable — falling back to manual.")
                     break
-
-                await self._notify_gemini_answer(solution, captcha_screenshot)
 
                 if not await self.click_aktivieren():
                     print(f"[CAPTCHA] Gemini attempt {attempt}: Aktivieren not clickable — falling back to manual.")

@@ -157,13 +157,11 @@ async def test_solve_with_retry_gemini_succeeds_on_second_attempt(monkeypatch):
     handler = captcha_module.CaptchaHandler(page=object())
 
     _solve_with_screenshot = AsyncMock(return_value=("SOLUTION", b"img"))
-    _notify_gemini_answer = AsyncMock()
     click_aktivieren = AsyncMock(return_value=True)
     is_captcha_error = AsyncMock(side_effect=[True, False])
     reload_captcha_image = AsyncMock(return_value=True)
 
     monkeypatch.setattr(handler, "_solve_with_screenshot", _solve_with_screenshot)
-    monkeypatch.setattr(handler, "_notify_gemini_answer", _notify_gemini_answer)
     monkeypatch.setattr(handler, "click_aktivieren", click_aktivieren)
     monkeypatch.setattr(handler, "is_captcha_error", is_captcha_error)
     monkeypatch.setattr(handler, "reload_captcha_image", reload_captcha_image)
@@ -179,7 +177,6 @@ async def test_solve_with_retry_falls_back_to_manual_when_gemini_exhausted(monke
     handler = captcha_module.CaptchaHandler(page=object(), telegram=object())
 
     monkeypatch.setattr(handler, "_solve_with_screenshot", AsyncMock(return_value=("X", b"img")))
-    monkeypatch.setattr(handler, "_notify_gemini_answer", AsyncMock())
     monkeypatch.setattr(handler, "click_aktivieren", AsyncMock(return_value=True))
     monkeypatch.setattr(handler, "is_captcha_error", AsyncMock(return_value=True))
     monkeypatch.setattr(handler, "reload_captcha_image", AsyncMock(return_value=True))
