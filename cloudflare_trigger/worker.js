@@ -5,6 +5,7 @@
  *  1. Cron (scheduled) — fires workflow_dispatch every hour automatically.
  *  2. HTTP (fetch)     — Telegram webhook handler:
  *       /book        → triggers workflow_dispatch immediately
+ *       /status      → reads and reports current Gist state (interval, last run, captcha)
  *       plain text   → if captcha_pending in Gist, saves reply so GitHub Actions picks it up
  *
  * Secrets required (wrangler secret put <NAME>):
@@ -35,7 +36,7 @@ export default {
     }
   },
 
-  /** Telegram webhook: /book triggers immediately; plain text submits captcha reply. */
+  /** Telegram webhook: /book triggers, /status reports state, plain text submits captcha reply. */
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
@@ -74,6 +75,8 @@ export default {
     if (command === "/book") {
       // Reply to Telegram immediately (5 s window), then trigger workflow asynchronously
       ctx.waitUntil(handleBook(env, chatId));
+    } else if (command === "/status") {
+      ctx.waitUntil(handleStatus(env, chatId));
     } else if (text && !text.startsWith("/")) {
       // Plain text — could be a captcha reply; check Gist before acting
       ctx.waitUntil(handleCaptchaReply(env, chatId, text));
@@ -95,6 +98,32 @@ async function handleBook(env, chatId) {
       ? "✅ Workflow triggered! Check GitHub Actions for progress."
       : "❌ Failed to trigger workflow. Check Cloudflare Worker logs.",
   );
+}
+
+async function handleStatus(env, chatId) {
+  const state = await readGist(env);
+  if (!state) {
+    await sendTelegram(env, chatId, "❌ Could not read status from Gist. Check Worker logs.");
+    return;
+  }
+
+  const intervalMin = state.interval_minutes ?? "—";
+
+  let lastRunText = "Never";
+  if (state.last_run_ts && state.last_run_ts > 0) {
+    const lastRunDate = new Date(state.last_run_ts * 1000);
+    lastRunText = lastRunDate.toUTCString();
+  }
+
+  const captchaStatus = state.captcha_pending ? "⚠️ Pending" : "✅ None";
+
+  const message =
+    `📊 *Bot Status*\n\n` +
+    `🕐 *Check Interval:* \`${intervalMin} min\`\n` +
+    `🕑 *Last Run:* \`${lastRunText}\`\n` +
+    `🔐 *Captcha:* ${captchaStatus}`;
+
+  await sendTelegram(env, chatId, message);
 }
 
 async function handleCaptchaReply(env, chatId, text) {
