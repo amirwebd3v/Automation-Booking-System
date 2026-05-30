@@ -11,6 +11,27 @@ from booking import BookingModule
 from captcha_handler import CaptchaSolveError
 
 
+def _build_run_summary(
+    used_gb: float,
+    remaining_gb: float,
+    total_gb: float,
+    should_book: bool,
+    booking_success: "bool | None",
+) -> str:
+    """Build the end-of-run Telegram summary message."""
+    lines = [
+        "✅ *Run complete.*",
+        f"Used: `{used_gb:.2f} GB` / Total: `{total_gb:.2f} GB` / Remaining: `{remaining_gb:.2f} GB`",
+    ]
+    if should_book and booking_success:
+        lines.append("📦 *2 GB packet booked successfully.*")
+    elif should_book and not booking_success:
+        lines.append("⚠️ *Booking attempted but did not succeed.*")
+    else:
+        lines.append("ℹ️ *No action needed.* Data level is sufficient.")
+    return "\n".join(lines)
+
+
 async def _send_error_alert(telegram: TelegramNotifier, message: str, page=None) -> None:
     screenshot_sent = False
     if page is not None:
@@ -72,14 +93,12 @@ async def main():
 
         engine = DecisionEngine(threshold_gb=0.5)
         should_book = engine.should_book(remaining_gb)
+        booking_success = None
         if should_book:
             booker = BookingModule(page, telegram, config)
-            success = await booker.book_2gb_packet()
-            if success:
-                await telegram.send(
-                    f"✅ *2 GB packet booked successfully.*\n"
-                    f"Used: `{used_gb:.2f} GB` / Total: `{total_gb:.2f} GB`"
-                )
+            booking_success = await booker.book_2gb_packet()
+
+        await telegram.send(_build_run_summary(used_gb, remaining_gb, total_gb, should_book, booking_success))
 
 
     except CaptchaSolveError as e:
