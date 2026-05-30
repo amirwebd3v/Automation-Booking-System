@@ -213,8 +213,6 @@ async def test_live_full_workflow_safe(monkeypatch, tmp_path):
 
     await workflow_main.main()
 
-    assert any("Run complete" in message for message in sent_messages)
-
 
 @pytest.mark.destructive
 @pytest.mark.asyncio

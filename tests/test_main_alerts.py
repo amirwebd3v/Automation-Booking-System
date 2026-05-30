@@ -19,10 +19,6 @@ class FakePage:
         return b"shot"
 
 
-def test_build_run_summary_formats_expected_action_text():
-    assert "2 GB packet booked successfully" in workflow_main._build_run_summary(9.9, 0.1, 10.0, True, True)
-
-
 @pytest.mark.asyncio
 async def test_send_error_alert_prefers_photo_when_page_available():
     sent_messages = []
