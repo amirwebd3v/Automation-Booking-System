@@ -72,14 +72,23 @@ export default {
     // Extract command, stripping optional @botname suffix (e.g. /book@mybot → /book)
     const command = text.split(/[\s@]/)[0].toLowerCase();
 
-    if (command === "/book") {
+    console.log(
+      `[WEBHOOK] update=${update.update_id ?? "?"} chat=${chatId} ` +
+      `command=${command || "(plain-text)"} text=${JSON.stringify(text)}`,
+    );
+
+    if (command === "/start") {
+      await handleStart(env, chatId);
+    } else if (command === "/book") {
       // Reply to Telegram immediately (5 s window), then trigger workflow asynchronously
       ctx.waitUntil(handleBook(env, chatId));
     } else if (command === "/status") {
-      ctx.waitUntil(handleStatus(env, chatId));
+      await handleStatus(env, chatId);
     } else if (text && !text.startsWith("/")) {
       // Plain text — could be a captcha reply; check Gist before acting
       ctx.waitUntil(handleCaptchaReply(env, chatId, text));
+    } else if (command.startsWith("/")) {
+      console.log(`[WEBHOOK] Ignoring unsupported command: ${command}`);
     }
 
     return new Response("OK");
@@ -87,6 +96,18 @@ export default {
 };
 
 // ── Command handlers ───────────────────────────────────────────────────────────
+
+async function handleStart(env, chatId) {
+  console.log(`[START] Requested by chat ${chatId}`);
+  await sendTelegram(
+    env,
+    chatId,
+    "sim24 bot is online.\n\n" +
+      "Available commands:\n" +
+      "/status - read the current Gist-backed status\n" +
+      "/book - trigger the GitHub Actions workflow now",
+  );
+}
 
 async function handleBook(env, chatId) {
   await sendTelegram(env, chatId, "⏳ Triggering GitHub Actions workflow...");
@@ -101,12 +122,19 @@ async function handleBook(env, chatId) {
 }
 
 async function handleStatus(env, chatId) {
-  const state = await readGist(env);
-  if (!state) {
-    await sendTelegram(env, chatId, "Could not read status from Gist. Please check Worker logs.");
+  console.log(`[STATUS] Requested by chat ${chatId}`);
+  const gist = await readGist(env);
+  if (!gist.ok) {
+    console.error(`[STATUS] ${gist.error}`);
+    await sendTelegram(env, chatId, `❌ Status failed.\n${gist.error}`);
     return;
   }
 
+  console.log(`[STATUS] Gist read succeeded for chat ${chatId}`);
+  await sendTelegram(env, chatId, buildStatusMessage(gist.state));
+}
+
+function buildStatusMessage(state) {
   const intervalMin = state.interval_minutes ?? "—";
 
   let lastRunText = "Never";
@@ -123,12 +151,18 @@ async function handleStatus(env, chatId) {
     `🕑 Last Run: ${lastRunText}\n` +
     `🔐 Captcha: ${captchaStatus}`;
 
-  await sendTelegram(env, chatId, message);
+  return message;
 }
 
 async function handleCaptchaReply(env, chatId, text) {
-  const state = await readGist(env);
-  if (!state || !state.captcha_pending) return; // nothing pending — ignore
+  const gist = await readGist(env);
+  if (!gist.ok) {
+    console.error(`[CAPTCHA] ${gist.error}`);
+    return;
+  }
+
+  const state = gist.state;
+  if (!state.captcha_pending) return; // nothing pending — ignore
 
   state.captcha_reply   = text;
   state.captcha_pending = false;
@@ -139,6 +173,7 @@ async function handleCaptchaReply(env, chatId, text) {
       env,
       chatId,
       `✅ *Captcha code submitted:* \`${text}\`\nThe booking workflow will pick it up now.`,
+      "Markdown",
     );
   } else {
     await sendTelegram(
@@ -151,12 +186,30 @@ async function handleCaptchaReply(env, chatId, text) {
 
 // ── GitHub helpers ─────────────────────────────────────────────────────────────
 
+function getGistToken(env) {
+  return env.GITHUB_GIST_TOKEN || env.GIST_TOKEN || "";
+}
+
+function getGistId(env) {
+  return env.GITHUB_GIST_ID || env.GIST_ID || "";
+}
+
+function getGitHubPat(env) {
+  return env.GITHUB_PAT || getGistToken(env);
+}
+
 async function triggerGitHubWorkflow(env) {
+  const githubPat = getGitHubPat(env);
+  if (!githubPat) {
+    console.error("[ERROR] Missing GITHUB_PAT (or fallback GIST token with workflow scope).");
+    return false;
+  }
+
   const apiUrl = `https://api.github.com/repos/${OWNER}/${REPO}/actions/workflows/${WORKFLOW}/dispatches`;
   const resp = await fetch(apiUrl, {
     method: "POST",
     headers: {
-      "Authorization":        `Bearer ${env.GITHUB_PAT}`,
+      "Authorization":        `Bearer ${githubPat}`,
       "Accept":               "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent":           `${OWNER}/${REPO}-cf-trigger`,
@@ -175,8 +228,9 @@ async function triggerGitHubWorkflow(env) {
 // ── Gist helpers ───────────────────────────────────────────────────────────────
 
 function gistHeaders(env) {
+  const gistToken = getGistToken(env);
   return {
-    "Authorization":        `Bearer ${env.GIST_TOKEN}`,
+    "Authorization":        `Bearer ${gistToken}`,
     "Accept":               "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent":           `${OWNER}/${REPO}-cf-trigger`,
@@ -184,26 +238,61 @@ function gistHeaders(env) {
 }
 
 async function readGist(env) {
+  const gistId = getGistId(env);
+  const gistToken = getGistToken(env);
+
+  if (!gistToken) {
+    return { ok: false, error: "Cloudflare secret GIST_TOKEN (or GITHUB_GIST_TOKEN) is missing." };
+  }
+  if (!gistId) {
+    return { ok: false, error: "Cloudflare secret GIST_ID (or GITHUB_GIST_ID) is missing." };
+  }
+
   try {
-    const resp = await fetch(`https://api.github.com/gists/${env.GIST_ID}`, {
+    const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
       headers: gistHeaders(env),
     });
     if (!resp.ok) {
-      console.error(`[ERROR] Gist read failed: HTTP ${resp.status}`);
-      return null;
+      const body = await resp.text();
+      console.error(`[ERROR] Gist read failed: HTTP ${resp.status} — ${body}`);
+
+      if (resp.status === 401 || resp.status === 403) {
+        return { ok: false, error: "Gist token is invalid or missing the gist scope." };
+      }
+      if (resp.status === 404) {
+        return { ok: false, error: "Gist not found. Check GIST_ID / GITHUB_GIST_ID and token access." };
+      }
+      return { ok: false, error: `GitHub Gist API returned HTTP ${resp.status}.` };
     }
     const data    = await resp.json();
     const content = data.files?.[GIST_FILENAME]?.content;
-    return content ? JSON.parse(content) : null;
+    if (!content) {
+      return { ok: false, error: `Gist file ${GIST_FILENAME} was not found.` };
+    }
+
+    try {
+      return { ok: true, state: JSON.parse(content) };
+    } catch (e) {
+      console.error(`[ERROR] Gist JSON parse failed: ${e}`);
+      return { ok: false, error: `Gist file ${GIST_FILENAME} does not contain valid JSON.` };
+    }
   } catch (e) {
     console.error(`[ERROR] Gist read exception: ${e}`);
-    return null;
+    return { ok: false, error: "Network error while reading the Gist. Check Worker logs." };
   }
 }
 
 async function writeGist(env, state) {
+  const gistId = getGistId(env);
+  const gistToken = getGistToken(env);
+
+  if (!gistToken || !gistId) {
+    console.error("[ERROR] Cannot write Gist: missing GIST token or GIST id secret.");
+    return false;
+  }
+
   try {
-    const resp = await fetch(`https://api.github.com/gists/${env.GIST_ID}`, {
+    const resp = await fetch(`https://api.github.com/gists/${gistId}`, {
       method: "PATCH",
       headers: { ...gistHeaders(env), "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -223,21 +312,30 @@ async function writeGist(env, state) {
 
 // ── Telegram helper ────────────────────────────────────────────────────────────
 
-async function sendTelegram(env, chatId, text, parseMode = "Markdown") {
+async function sendTelegram(env, chatId, text, parseMode = null) {
   try {
+    const payload = { chat_id: chatId, text };
+    if (parseMode) {
+      payload.parse_mode = parseMode;
+    }
+
     const resp = await fetch(
       `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text, parse_mode: parseMode }),
+        body: JSON.stringify(payload),
       },
     );
     if (!resp.ok) {
       const body = await resp.text();
       console.error(`[ERROR] Telegram sendMessage failed: HTTP ${resp.status} — ${body}`);
+      return false;
     }
+    console.log(`[TG] sendMessage ok chat=${chatId}`);
+    return true;
   } catch (e) {
     console.error(`[ERROR] Telegram sendMessage exception: ${e}`);
+    return false;
   }
 }
