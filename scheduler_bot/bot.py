@@ -18,8 +18,7 @@ Required environment variables:
   TELEGRAM_CHAT_ID     — your personal chat ID (only authorized user)
   GITHUB_GIST_TOKEN    — Classic PAT with the `gist` scope  (GIST_TOKEN also accepted)
   GITHUB_GIST_ID       — Gist ID                            (GIST_ID   also accepted)
-  GITHUB_PAT           — Classic PAT with gist + workflow scopes (for workflow dispatch)
-                         Falls back to GITHUB_GIST_TOKEN if not set.
+  GITHUB_GIST_TOKEN    — also used for workflow dispatch (needs gist + workflow scopes)
 """
 
 import asyncio
@@ -80,13 +79,6 @@ class Sim24Bot:
             or os.environ.get("GIST_ID")
             or ""
         )
-        # GITHUB_PAT must have gist + workflow scopes for dispatch;
-        # falls back to the gist token in case the user combined both scopes there.
-        self.gh_pat: str = (
-            os.environ.get("GITHUB_PAT")
-            or self.gist_token
-        )
-
         self._offset: int = 0
         self._session: aiohttp.ClientSession | None = None
 
@@ -190,7 +182,7 @@ class Sim24Bot:
             f"/actions/workflows/{WORKFLOW}/dispatches"
         )
         headers = {
-            "Authorization":        f"Bearer {self.gh_pat}",
+            "Authorization":        f"Bearer {self.gist_token}",
             "Accept":               "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent":           f"{OWNER}/{REPO}-py-bot",
@@ -229,7 +221,7 @@ class Sim24Bot:
     @staticmethod
     def _format_berlin_timestamp(ts: float) -> str:
         dt = datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone(BERLIN_TZ)
-        return f"{dt.strftime('%Y-%m-%d %H:%M %Z')} (Europe/Berlin)"
+        return f"{dt.strftime('%Y-%m-%d %H:%M %Z')}"
 
     @staticmethod
     def _escape_markdown(text: str) -> str:
@@ -288,7 +280,7 @@ class Sim24Bot:
         else:
             await self._send(
                 "❌ Failed to trigger workflow.\n"
-                "Make sure `GITHUB_PAT` has the `workflow` scope."
+                "Make sure `GITHUB_GIST_TOKEN` has the `workflow` scope."
             )
 
     async def _on_captcha_reply(self, text: str) -> None:
@@ -327,7 +319,7 @@ class Sim24Bot:
             text = (
                 "✅ *Workflow triggered!*\nCheck GitHub Actions for progress."
                 if ok
-                else "❌ Failed to trigger workflow. Check `GITHUB_PAT` scope."
+                else "❌ Failed to trigger workflow. Check `GITHUB_GIST_TOKEN` scope."
             )
             await self._send(text)
 
