@@ -103,7 +103,7 @@ async function handleBook(env, chatId) {
 async function handleStatus(env, chatId) {
   const state = await readGist(env);
   if (!state) {
-    await sendTelegram(env, chatId, "Could not read status from Gist. Please check Worker logs.", "");
+    await sendTelegram(env, chatId, "Could not read status from Gist. Please check Worker logs.");
     return;
   }
 
@@ -123,7 +123,7 @@ async function handleStatus(env, chatId) {
     `🕑 Last Run: ${lastRunText}\n` +
     `🔐 Captcha: ${captchaStatus}`;
 
-  await sendTelegram(env, chatId, message, "");
+  await sendTelegram(env, chatId, message);
 }
 
 async function handleCaptchaReply(env, chatId, text) {
