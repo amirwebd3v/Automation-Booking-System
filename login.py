@@ -76,6 +76,7 @@ class Sim24Login:
         captcha = CaptchaHandler(page, self.telegram)
 
         session_reused = False
+        state_saved = False
 
         if STORAGE_STATE_PATH.exists():
             print(f"[LOGIN] Found stored session: {STORAGE_STATE_PATH}")
@@ -145,6 +146,7 @@ class Sim24Login:
                         print(f"[LOGIN] ✅ Login successful. URL: {current_url}")
                         await context.storage_state(path=str(STORAGE_STATE_PATH))
                         print(f"[LOGIN] Saved session state to {STORAGE_STATE_PATH}")
+                        state_saved = True
                         break
 
                     if "login" in current_url.lower():
@@ -173,6 +175,9 @@ class Sim24Login:
             await page.goto(DATA_URL, wait_until="domcontentloaded", timeout=30_000)
             await page.wait_for_selector(".e-data_usage_meter", timeout=10_000)
             print("[LOGIN] Data usage page loaded successfully.")
+            if not session_reused and not state_saved:
+                await context.storage_state(path=str(STORAGE_STATE_PATH))
+                print(f"[LOGIN] Saved session state to {STORAGE_STATE_PATH}")
             return browser, page
 
         except Exception as e:
