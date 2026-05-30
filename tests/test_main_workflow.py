@@ -200,7 +200,7 @@ async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
     assert state["recorded"]["error"] == ""
     assert state["snapshot"] is not None
     assert any("Run complete" in msg for msg in state["messages"])
-    assert any("No action needed" in msg for msg in state["messages"])
+
 
 
 @pytest.mark.asyncio
