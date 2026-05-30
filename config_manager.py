@@ -1,9 +1,15 @@
 """
 Config Manager
 ─────────────
-Reads credentials from environment variables (GitHub Secrets).
-Stores and retrieves dynamic state (last_run, interval) via a GitHub Gist
-so the data persists across GitHub Actions runs.
+Reads credentials from environment variables (GitHub Secrets / .env).
+Stores and retrieves dynamic state via a GitHub Gist so values persist
+across GitHub Actions runs.
+
+Gist state keys:
+  interval_minutes  — minimum minutes between booking pipeline runs
+  last_run_ts       — Unix timestamp of the last completed run
+  captcha_pending   — True while waiting for a human captcha reply
+  captcha_reply     — text entered by the human; consumed by captcha_handler
 """
 
 import os

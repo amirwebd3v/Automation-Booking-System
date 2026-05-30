@@ -5,14 +5,10 @@ Run this on your local machine BEFORE deploying to GitHub Actions.
 Tests each module independently so you can catch issues early.
 
 Usage:
-  cd src
-  python ../test_local.py
-
-  Or test a specific module:
-  python ../test_local.py --test telegram
-  python ../test_local.py --test login
-  python ../test_local.py --test data
-  python ../test_local.py --test full
+  python test_local.py --test telegram   # verify Telegram connectivity
+  python test_local.py --test login      # real Playwright browser login
+  python test_local.py --test data       # login + read data usage
+  python test_local.py --test full       # full dry run (booking NOT executed)
 """
 
 import asyncio
