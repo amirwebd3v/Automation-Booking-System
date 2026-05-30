@@ -22,6 +22,7 @@ const REPO          = "Automation-Booking-System";
 const WORKFLOW      = "check_data.yml";
 const BRANCH        = "main";
 const GIST_FILENAME = "sim24_bot_config.json";
+const BERLIN_TIMEZONE = "Europe/Berlin";
 
 // ── Entry points ──────────────────────────────────────────────────────────────
 
@@ -104,7 +105,7 @@ async function handleStart(env, chatId) {
     chatId,
     "sim24 bot is online.\n\n" +
       "Available commands:\n" +
-      "/status - read the current Gist-backed status\n" +
+      "/status - read last run, next automatic run, last error, used data, and total data\n" +
       "/book - trigger the GitHub Actions workflow now",
   );
 }
@@ -135,23 +136,70 @@ async function handleStatus(env, chatId) {
 }
 
 function buildStatusMessage(state) {
-  const intervalMin = state.interval_minutes ?? "—";
-
   let lastRunText = "Never";
   if (state.last_run_ts && state.last_run_ts > 0) {
-    const lastRunDate = new Date(state.last_run_ts * 1000);
-    lastRunText = lastRunDate.toUTCString();
+    lastRunText = formatBerlinTimestamp(state.last_run_ts);
   }
 
-  const captchaStatus = state.captcha_pending ? "⚠️ Pending" : "✅ None";
+  const nextRunMinutes = minutesUntilNextRun();
+  const lastError = formatLastError(state);
+  const usedData = formatDataVolume(state.last_used_kb);
+  const totalData = formatDataVolume(state.last_total_kb);
 
   const message =
     `📊 Bot Status\n\n` +
-    `🕐 Check Interval: ${intervalMin} min\n` +
     `🕑 Last Run: ${lastRunText}\n` +
-    `🔐 Captcha: ${captchaStatus}`;
+    `⏱️ Next Run In: ${nextRunMinutes} min\n` +
+    `❌ Error: ${lastError}\n` +
+    `📈 Used Data: ${usedData}\n` +
+    `📦 Total Data: ${totalData}`;
 
   return message;
+}
+
+function minutesUntilNextRun(now = new Date()) {
+  const nextRun = new Date(now);
+  nextRun.setUTCMinutes(0, 0, 0);
+  nextRun.setUTCHours(nextRun.getUTCHours() + 1);
+  const remainingMinutes = Math.ceil((nextRun.getTime() - now.getTime()) / 60000);
+  return Math.max(1, remainingMinutes);
+}
+
+function formatDataVolume(kb) {
+  const value = Number(kb);
+  if (!Number.isFinite(value)) {
+    return "Not yet recorded";
+  }
+  return `${(value / (1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatBerlinTimestamp(tsSeconds) {
+  const date = new Date(Number(tsSeconds) * 1000);
+  const formatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: BERLIN_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  });
+  const parts = Object.fromEntries(
+    formatter
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${parts.timeZoneName} (${BERLIN_TIMEZONE})`;
+}
+
+function formatLastError(state) {
+  if (state.last_run_ok === false) {
+    return state.last_run_error || "Last run did not complete successfully.";
+  }
+  return "None";
 }
 
 async function handleCaptchaReply(env, chatId, text) {
