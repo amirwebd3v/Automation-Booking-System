@@ -103,7 +103,7 @@ async function handleBook(env, chatId) {
 async function handleStatus(env, chatId) {
   const state = await readGist(env);
   if (!state) {
-    await sendTelegram(env, chatId, "❌ Could not read status from Gist. Check Worker logs.");
+    await sendTelegram(env, chatId, "Could not read status from Gist. Please check Worker logs.", "");
     return;
   }
 
@@ -118,12 +118,12 @@ async function handleStatus(env, chatId) {
   const captchaStatus = state.captcha_pending ? "⚠️ Pending" : "✅ None";
 
   const message =
-    `📊 *Bot Status*\n\n` +
-    `🕐 *Check Interval:* \`${intervalMin} min\`\n` +
-    `🕑 *Last Run:* \`${lastRunText}\`\n` +
-    `🔐 *Captcha:* ${captchaStatus}`;
+    `📊 Bot Status\n\n` +
+    `🕐 Check Interval: ${intervalMin} min\n` +
+    `🕑 Last Run: ${lastRunText}\n` +
+    `🔐 Captcha: ${captchaStatus}`;
 
-  await sendTelegram(env, chatId, message);
+  await sendTelegram(env, chatId, message, "");
 }
 
 async function handleCaptchaReply(env, chatId, text) {
@@ -223,14 +223,14 @@ async function writeGist(env, state) {
 
 // ── Telegram helper ────────────────────────────────────────────────────────────
 
-async function sendTelegram(env, chatId, text) {
+async function sendTelegram(env, chatId, text, parseMode = "Markdown") {
   try {
     const resp = await fetch(
       `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: parseMode }),
       },
     );
     if (!resp.ok) {
