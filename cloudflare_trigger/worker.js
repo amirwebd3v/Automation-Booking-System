@@ -112,7 +112,7 @@ async function handleStart(env, chatId) {
 
 async function handleBook(env, chatId) {
   await sendTelegram(env, chatId, "⏳ Triggering GitHub Actions workflow...");
-  const ok = await triggerGitHubWorkflow(env);
+  const ok = await triggerGitHubWorkflow(env, true);
   await sendTelegram(
     env,
     chatId,
@@ -246,7 +246,7 @@ function getGitHubPat(env) {
   return env.GITHUB_PAT || getGistToken(env);
 }
 
-async function triggerGitHubWorkflow(env) {
+async function triggerGitHubWorkflow(env, forceReport = false) {
   const githubPat = getGitHubPat(env);
   if (!githubPat) {
     console.error("[ERROR] Missing GITHUB_PAT (or fallback GIST token with workflow scope).");
@@ -263,7 +263,7 @@ async function triggerGitHubWorkflow(env) {
       "User-Agent":           `${OWNER}/${REPO}-cf-trigger`,
       "Content-Type":         "application/json",
     },
-    body: JSON.stringify({ ref: BRANCH }),
+    body: JSON.stringify({ ref: BRANCH, inputs: forceReport ? { force_report: "true" } : {} }),
   });
 
   if (!resp.ok) {

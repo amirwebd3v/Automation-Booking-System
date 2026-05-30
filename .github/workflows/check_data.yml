@@ -8,6 +8,12 @@ name: sim24 Data Check & Auto-Book
 
 on:
   workflow_dispatch:  # Triggered by Cloudflare Worker cron (hourly) — see cloudflare_trigger/
+    inputs:
+      force_report:
+        description: 'Always send a status message even if no booking is needed'
+        required: false
+        default: 'false'
+        type: string
 
 jobs:
   check-and-book:
@@ -67,6 +73,7 @@ jobs:
           GEMINI_API_KEY:     ${{ secrets.GEMINI_API_KEY }}
           GIST_TOKEN:  ${{ secrets.GIST_TOKEN }}
           GIST_ID:     ${{ secrets.GIST_ID }}
+          FORCE_REPORT: ${{ github.event.inputs.force_report }}
         run: |
           python main.py
 
