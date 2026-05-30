@@ -1,6 +1,7 @@
 """sim24 Auto Data Booker main entry point."""
 
 import asyncio
+import os
 from config_manager import ConfigManager
 from telegram_notify import TelegramNotifier
 from login import Sim24Login
@@ -73,6 +74,7 @@ async def main():
 
         engine = DecisionEngine(threshold_gb=0.5)
         should_book = engine.should_book(remaining_gb)
+        force_report = os.environ.get("FORCE_REPORT", "false").lower() == "true"
         booking_success = None
         if should_book:
             booker = BookingModule(page, telegram, config)
@@ -86,6 +88,12 @@ async def main():
             await telegram.send(
                 f"✅ *2 GB packet booked successfully.*\n"
                 f"Used: `{used_gb:.2f} GB` / Total: `{total_gb:.2f} GB`"
+            )
+        elif not should_book and force_report:
+            await telegram.send(
+                f"📊 *Data status (no booking needed)*\n"
+                f"Used: `{used_gb:.2f} GB` / Total: `{total_gb:.2f} GB`\n"
+                f"Remaining: `{remaining_gb:.2f} GB` (threshold: 0.5 GB)"
             )
 
     except CaptchaSolveError as e:
