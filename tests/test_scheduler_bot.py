@@ -15,7 +15,6 @@ def _bot_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID",   "999")
     monkeypatch.setenv("GIST_TOKEN",         "gist-tok")
     monkeypatch.setenv("GIST_ID",            "gist-id")
-    monkeypatch.setenv("GITHUB_PAT",         "gh-pat")
 
 
 @pytest.fixture()
@@ -49,7 +48,7 @@ def test_format_status_with_timestamp():
         },
         now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
     )
-    assert "2023-11-14 23:13 CET (Europe/Berlin)" in text
+    assert "2023-11-14 23:13 CET" in text
     assert "26 min" in text
     assert "128.28 GB" in text
     assert "130.00 GB" in text
@@ -118,6 +117,57 @@ async def test_on_status_sends_error_when_gist_unavailable(bot):
 
 
 # ── _on_book ──────────────────────────────────────────────────────────────────
+
+class _FakeDispatchResponse:
+    def __init__(self, status: int, body: str = ""):
+        self.status = status
+        self._body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self):
+        return self._body
+
+
+class _FakeDispatchSession:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.calls.append(
+            {
+                "url": url,
+                "headers": headers,
+                "json": json,
+                "timeout": timeout,
+            }
+        )
+        return self.response
+
+
+@pytest.mark.asyncio
+async def test_trigger_workflow_posts_expected_dispatch_request(bot):
+    response = _FakeDispatchResponse(status=204)
+    session = _FakeDispatchSession(response)
+    bot._session = session
+
+    assert await bot._trigger_workflow() is True
+
+    assert len(session.calls) == 1
+    request = session.calls[0]
+    assert request["url"].endswith("/actions/workflows/check_data.yml/dispatches")
+    assert request["headers"]["Authorization"] == "Bearer gist-tok"
+    assert request["headers"]["Accept"] == "application/vnd.github+json"
+    assert request["headers"]["X-GitHub-Api-Version"] == "2022-11-28"
+    assert request["headers"]["User-Agent"] == "amirwebd3v/Automation-Booking-System-py-bot"
+    assert request["headers"]["Content-Type"] == "application/json"
+    assert request["json"] == {"ref": "main"}
+    assert request["timeout"] is not None
 
 @pytest.mark.asyncio
 async def test_on_book_sends_success_when_workflow_triggered(bot):
@@ -324,7 +374,6 @@ async def test_handle_update_rejects_callback_from_unauthorized_chat(bot):
 # ── env var fallback ──────────────────────────────────────────────────────────
 
 def test_env_fallback_uses_gist_token_when_github_gist_token_absent(monkeypatch):
-    monkeypatch.delenv("GITHUB_PAT", raising=False)
     monkeypatch.delenv("GITHUB_GIST_TOKEN", raising=False)
     monkeypatch.setenv("GIST_TOKEN", "fallback-tok")
     from scheduler_bot import bot as bot_module
@@ -332,7 +381,6 @@ def test_env_fallback_uses_gist_token_when_github_gist_token_absent(monkeypatch)
     importlib.reload(bot_module)
     b = bot_module.Sim24Bot()
     assert b.gist_token == "fallback-tok"
-    assert b.gh_pat     == "fallback-tok"
 
 
 def test_env_github_gist_token_takes_precedence(monkeypatch):

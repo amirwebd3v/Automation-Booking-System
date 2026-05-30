@@ -160,6 +160,9 @@ async def test_live_login_and_data_check(monkeypatch, tmp_path):
     finally:
         if browser:
             await browser.close()
+        pw = getattr(login_runner, "_playwright", None)
+        if pw is not None:
+            await pw.stop()
 
 
 @pytest.mark.asyncio
@@ -181,6 +184,9 @@ async def test_live_full_workflow_safe(monkeypatch, tmp_path):
             self.sim24_password = env["SIM24_PASSWORD"]
 
         def record_run(self, *, success, error="", used_kb=None, total_kb=None):
+            return None
+
+        def record_usage_snapshot(self, *, used_kb, total_kb):
             return None
 
     sent_messages = []
@@ -235,6 +241,9 @@ async def test_live_full_workflow_destructive(monkeypatch, tmp_path):
             self.sim24_password = env["SIM24_PASSWORD"]
 
         def record_run(self, *, success, error="", used_kb=None, total_kb=None):
+            return None
+
+        def record_usage_snapshot(self, *, used_kb, total_kb):
             return None
 
     sent_messages = []
