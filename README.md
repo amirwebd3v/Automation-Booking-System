@@ -1,71 +1,63 @@
 # sim24 Auto Data Booker
 
-This project automates sim24.de data checks and books a 2 GB packet when remaining data falls below a threshold. It is not a fully autonomous bot: if sim24 shows a captcha during login or booking, the system sends the captcha image to Telegram and waits for a human reply.
+Automates sim24.de data checks and books a 2 GB packet when remaining data falls below 0.5 GB.
+Captcha handling is fully autonomous via Gemini AI; a human fallback via Telegram is available if Gemini fails.
 
-The repository currently contains two runtimes:
+## How It Works
 
-1. A scheduled GitHub Actions workflow that runs the booking pipeline.
-2. A small always-on Telegram control bot that handles commands and captcha replies.
-
-Both runtimes share state through a GitHub Gist.
-
-## What The Project Does
-
-On each eligible cycle, the pipeline:
-
-1. Loads credentials and dynamic state.
-2. Checks whether the configured interval has elapsed.
-3. Launches a fresh browser session.
-4. Logs in to sim24.
-5. Navigates to the data-usage page.
-6. Reads used and total data.
-7. Computes remaining data.
-8. If remaining data is below 0.5 GB, triggers the booking flow.
-9. Sends status and error notifications to Telegram.
-10. Stores the latest run timestamp back in the shared Gist state.
-
-The control bot does not perform booking itself. It only:
-
-1. Changes the configured interval in the Gist.
-2. Reports the current interval and last-run timestamp.
-3. Triggers the GitHub Actions workflow manually via `/book`.
-
-## Current Architecture
-
-```text
-GitHub Actions workflow (.github/workflows/check_data.yml)
-    -> runs on cron: every 30 minutes
-    -> installs Python + Playwright Chromium
-    -> injects secrets as environment variables
-    -> executes main.py
-
-main.py
-    -> ConfigManager loads env + Gist state
-    -> TelegramNotifier sends updates
-    -> interval gate decides whether this run should do real work
-    -> Sim24Login performs a fresh login
-    -> DataChecker reads usage from the sim24 page
-    -> DecisionEngine compares remaining data to threshold
-    -> BookingModule attempts booking if threshold is crossed
-    -> ConfigManager writes updated last_run_ts back to the Gist
-
-Always-on process (scheduler_bot/bot.py)
-    -> long-polls Telegram
-    -> accepts /interval, /status, /help, /book
-    -> reads/writes the same Gist state
-    -> optionally dispatches the GitHub Actions workflow immediately
 ```
+Cloudflare Worker (cron: every hour)
+    └─ POST workflow_dispatch → GitHub Actions check_data.yml
+           └─ installs Python + Playwright Chromium
+              └─ runs main.py
+                     ├─ ConfigManager   — loads env vars + Gist state
+                     ├─ interval gate   — skip if not enough time has elapsed
+                     ├─ Sim24Login      — Playwright browser login (Edge locally, Chromium in CI)
+                     ├─ DataChecker     — reads used/total KB from the data-usage page
+                     ├─ DecisionEngine  — books if remaining < 0.5 GB
+                     ├─ BookingModule   — clicks Buchen, activates packet, handles captcha
+                     ├─ TelegramNotifier — sends run summary or error alerts
+                     └─ ConfigManager   — writes last_run_ts back to Gist
+
+scheduler_bot/bot.py  (always-on, runs on your machine / a server)
+    └─ long-polls Telegram
+       ├─ 📊 Status   — reads Gist, shows last-run time + inline [🔄 Refresh] [📦 Book Now]
+       └─ 📦 Book Now — dispatches the GitHub Actions workflow immediately
+```
+
+Captcha flow (used in login and booking):
+
+1. Gemini 1.5 Flash reads the captcha image automatically.
+2. If Gemini fails after 3 attempts, a screenshot is sent to Telegram.
+3. The user replies with the captcha text within 5 minutes.
+4. The reply is entered into the page and the workflow resumes.
 
 ## Project Structure
 
-```text
+```
 Automation-Booking-System/
 ├── .github/
 │   └── workflows/
-│       └── check_data.yml
+│       ├── check_data.yml      — main booking pipeline (workflow_dispatch only)
+│       └── tests.yml           — CI test runner (push / PR / manual)
+├── cloudflare_trigger/
+│   ├── worker.js               — hourly cron → workflow_dispatch + webhook captcha relay
+│   └── wrangler.toml           — Cloudflare Worker config
 ├── scheduler_bot/
-│   ├── bot.py
-│   └── requirements_bot.txt
+│   ├── __init__.py
+│   └── bot.py                  — always-on Telegram control bot (button UX)
+├── tests/
+│   ├── test_booking.py
+│   ├── test_captcha_handler.py
+│   ├── test_config_manager.py
+│   ├── test_data_checker.py
+│   ├── test_decision_engine.py
+│   ├── test_live_workflow.py   — live integration tests (require real credentials)
+│   ├── test_login.py
+│   ├── test_main_alerts.py
+│   ├── test_main_workflow.py
+│   ├── test_scheduler_bot.py
+│   └── test_telegram_notify.py
 ├── booking.py
 ├── captcha_handler.py
 ├── config_manager.py
@@ -74,74 +66,189 @@ Automation-Booking-System/
 ├── login.py
 ├── main.py
 ├── telegram_notify.py
-├── test_local.py
-├── tests/
-│   └── test_main_workflow.py
-├── requirements.txt
+├── test_local.py               — manual local runner (telegram / login / data / full)
+├── pyproject.toml              — project metadata, pytest config, ruff lint config
+├── requirements.txt            — runtime dependencies
+├── requirements-dev.txt        — test + lint dependencies
 ├── .env.example
 └── README.md
 ```
 
-## File-By-File Responsibilities
+## File Responsibilities
 
-### Core runtime
+### Core pipeline
 
 #### `main.py`
 
-The orchestration entry point for one pipeline run.
+Entry point for one pipeline run.
 
-Responsibilities:
-
-1. Create `ConfigManager`.
-2. Create `TelegramNotifier`.
-3. Stop early if the configured interval has not elapsed.
-4. Run login.
-5. Read data usage.
-6. Compute used, total, and remaining GB.
-7. Send a Telegram status report.
-8. Trigger booking when `remaining_gb < 0.5`.
-9. Update `last_run_ts`.
-10. Close the browser in `finally`.
-
-Important current behavior:
-
-1. The code updates `last_run_ts` after successful work.
-2. It also updates `last_run_ts` after several failure paths, including login failure, data-read failure, and unexpected exceptions.
-3. In practice, the timestamp behaves like the last attempted run, not strictly the last successful run.
+1. Instantiates `ConfigManager` and `TelegramNotifier`.
+2. Skips early if `is_time_to_run()` returns `False`.
+3. Calls `Sim24Login.login()` → returns `(browser, page)`.
+4. Calls `DataChecker.get_usage()` → returns `(used_kb, total_kb)`.
+5. Calls `DecisionEngine.should_book(remaining_gb)`.
+6. If booking is needed, calls `BookingModule.book_2gb_packet()`.
+7. Sends a run summary via `_build_run_summary()` → always includes "Run complete" + action taken.
+8. On `CaptchaSolveError` or unexpected exceptions: sends a photo alert with a screenshot.
+9. Calls `config.update_last_run()` in `finally` regardless of outcome.
+10. Closes the browser and stops Playwright in `finally`.
 
 #### `config_manager.py`
 
-Centralizes environment variables and shared state.
+Centralizes environment variables and shared Gist state.
 
-Reads these variables:
+Reads these environment variables:
 
-1. `TELEGRAM_BOT_TOKEN`
-2. `TELEGRAM_CHAT_ID`
-3. `SIM24_USERNAME`
-4. `SIM24_PASSWORD`
-5. `GIST_TOKEN`
-6. `GIST_ID`
+| Variable | Purpose |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
+| `TELEGRAM_CHAT_ID` | Authorized chat id |
+| `SIM24_USERNAME` | sim24 login username |
+| `SIM24_PASSWORD` | sim24 online password |
+| `GIST_TOKEN` | Classic PAT with `gist` scope |
+| `GIST_ID` | GitHub Gist id |
 
-State model stored in the Gist file `sim24_bot_config.json`:
+State stored in `sim24_bot_config.json` inside the Gist:
 
 ```json
 {
-  "interval_minutes": 30,
-  "last_run_ts": 0
+  "interval_minutes": 10,
+  "last_run_ts": 0,
+  "captcha_pending": false,
+  "captcha_reply": ""
 }
 ```
 
-Responsibilities:
+`captcha_pending` / `captcha_reply` are written by the booking pipeline and read by the Cloudflare Worker captcha relay when Gemini fails and a human reply is needed.
 
-1. Fetch the current JSON state from GitHub Gist.
-2. Expose `interval_minutes` and `last_run_ts` as properties.
-3. Decide whether enough time has elapsed.
-4. Persist `last_run_ts` back to the Gist.
-5. Persist a changed interval back to the Gist.
+If Gist loading fails, falls back to `interval_minutes=10, last_run_ts=0`.
 
-Fallback behavior:
+#### `login.py`
 
-If Gist loading fails, it falls back to:
+Playwright-based login sequence.
+
+1. Launches Playwright with Microsoft Edge (`USE_EDGE=true`) or Chromium (default / CI).
+2. Reuses `storage_state.json` if present to skip the login form.
+3. If the stored session is stale, falls back to credential login (up to 2 attempts).
+4. Handles pre-submit and post-submit captcha via `CaptchaHandler`.
+5. Saves `storage_state.json` after a successful fresh login.
+6. Returns `(browser, page)` pointed at the data-usage page, or `(None, None)` on failure.
+
+#### `data_checker.py`
+
+Scrapes used/total data from the sim24 usage page.
+
+- **Primary**: reads `aria-valuenow` / `aria-valuemax` from the progressbar element (KB values).
+- **Fallback**: parses German-formatted text (`98,30 GB`) from visible spans.
+
+Returns `(used_kb, total_kb)` or `(None, None)` on failure.
+
+#### `decision_engine.py`
+
+Single rule: `book if remaining_gb < threshold_gb` (default threshold: 0.5 GB).
+
+#### `booking.py`
+
+Executes the 2 GB packet booking flow.
+
+1. Locates the Buchen button via multiple CSS selectors.
+2. Aborts if the button is disabled (already active, payment issue, etc.).
+3. Dismisses cookie consent if present.
+4. Clicks the button while listening for the `getChangeServiceInfo` AJAX response.
+5. Parses the response HTML for the activation URL and form id.
+6. Calls `sendPostAndReplaceContent(url, formId)` via JavaScript.
+7. Falls back to a direct `changeService` POST if HTML parsing fails.
+8. Solves any post-activation captcha via `CaptchaHandler`.
+9. Verifies success by inspecting page content, dialogs, and URL hints.
+10. Sends a Telegram alert with an internal trace log on failure.
+
+#### `captcha_handler.py`
+
+Autonomous captcha resolution backed by Gemini 1.5 Flash with a human fallback.
+
+1. Detects captcha images using multiple CSS selectors.
+2. Encodes the image as base64 and calls the Gemini API.
+3. Enters the Gemini response into the captcha input field.
+4. If the code is wrong, reloads the captcha and retries (up to 3 attempts).
+5. If Gemini is unavailable or fails all 3 attempts, sends the screenshot to Telegram and waits up to **5 minutes** for a human reply written into the Gist.
+6. Raises `CaptchaSolveError` if the timeout expires.
+
+Requires `GEMINI_API_KEY` in the environment for the autonomous path.
+
+#### `telegram_notify.py`
+
+Thin async Telegram Bot API client.
+
+- `send(text)` — sends a Markdown-formatted message.
+- `send_photo(bytes, caption)` — uploads an image (used for captcha and error screenshots).
+
+#### `scheduler_bot/bot.py`
+
+Always-on Telegram control bot with a button-based UX.
+
+Reply keyboard (persistent bar shown to the authorized user):
+
+```
+[ 📊 Status ]  [ 📦 Book Now ]
+```
+
+- **📊 Status** — reads the Gist and sends last-run time + captcha state with inline buttons `[🔄 Refresh]` `[📦 Book Now]`.
+- **🔄 Refresh** (inline) — edits the status message in place with fresh Gist data.
+- **📦 Book Now** — dispatches the GitHub Actions `check_data.yml` workflow immediately.
+- **Plain text while `captcha_pending`** — saves the captcha reply to the Gist so the pipeline can pick it up.
+
+Authorization: only the `TELEGRAM_CHAT_ID` user is served; all other chats are silently ignored.
+
+Requires these environment variables in addition to the standard ones:
+
+| Variable | Purpose |
+|---|---|
+| `GITHUB_GIST_TOKEN` (or `GIST_TOKEN`) | Gist read/write |
+| `GITHUB_GIST_ID` (or `GIST_ID`) | Gist id |
+| `GITHUB_PAT` | Classic PAT with `gist` + `workflow` scopes (for dispatch); falls back to `GITHUB_GIST_TOKEN` |
+
+### Scheduling layer
+
+#### `cloudflare_trigger/worker.js`
+
+A Cloudflare Worker with two entry points:
+
+1. **Cron** (`0 * * * *` — every hour): calls `workflow_dispatch` on `check_data.yml`.  
+   GitHub's built-in `schedule` trigger is unreliable under load; this Worker provides consistent hourly execution.
+2. **Webhook** (`POST /webhook`): handles Telegram webhook updates:
+   - `/book` → dispatches the workflow immediately.
+   - `/status` → reads and reports Gist state.
+   - Plain text → if `captcha_pending`, saves the reply to the Gist.
+
+Cloudflare secrets required (`wrangler secret put <NAME>`):
+
+| Secret | Purpose |
+|---|---|
+| `GITHUB_PAT` | Fine-grained PAT, Actions: Read & Write |
+| `GIST_TOKEN` | Classic PAT with `gist` scope |
+| `GIST_ID` | Gist id |
+| `TELEGRAM_BOT_TOKEN` | Bot token |
+| `TELEGRAM_CHAT_ID` | Authorized chat id |
+| `TELEGRAM_WEBHOOK_SECRET` | Random string registered with `setWebhook` |
+
+> **Note:** The Python bot (`scheduler_bot/bot.py`) and the Cloudflare Worker webhook are mutually exclusive. Only one can receive Telegram updates at a time. The Python bot calls `deleteWebhook` on startup to claim long-polling; the Cloudflare Worker uses the webhook. Run one or the other, not both.
+
+## Setup
+
+### 1. Telegram bot
+
+1. Create a bot with `@BotFather`.
+2. Save the bot token.
+3. Get your personal chat id from `@userinfobot`.
+
+### 2. Gemini API key
+
+1. Go to [aistudio.google.com](https://aistudio.google.com) and create an API key.
+2. Add `GEMINI_API_KEY` to your `.env` and GitHub Secrets.
+
+### 3. GitHub Gist state store
+
+Create a **secret** Gist with filename `sim24_bot_config.json`:
 
 ```json
 {
@@ -150,377 +257,155 @@ If Gist loading fails, it falls back to:
 }
 ```
 
-#### `login.py`
+Save the Gist ID from the URL.
 
-Owns the full Playwright login sequence.
+### 4. GitHub tokens
 
-Current implementation details:
+| Token | Required scopes | Used by |
+|---|---|---|
+| `GIST_TOKEN` | `gist` | `config_manager.py`, Cloudflare Worker |
+| `GITHUB_PAT` | `gist` + `workflow` | `scheduler_bot/bot.py`, Cloudflare Worker dispatch |
 
-1. Starts Playwright asynchronously.
-2. Uses Microsoft Edge only when `USE_EDGE=true` is set locally.
-3. Otherwise uses Playwright Chromium.
-4. Navigates to `https://service.sim24.de/`.
-5. Waits for the login form.
-6. Checks for captcha before submit.
-7. Fills username and password.
-8. Clicks submit using multiple fallback selectors.
-9. Checks for captcha again after submit.
-10. Retries the login flow up to 2 times.
-11. On success, navigates to `https://service.sim24.de/mytariff/invoice/showGprsDataUsage`.
+A single Classic PAT with both scopes works for all consumers.
 
-Return contract:
+### 5. GitHub Actions secrets
 
-1. Returns `(browser, page)` on success.
-2. Returns `(None, None)` on failure.
-
-#### `data_checker.py`
-
-Scrapes usage data from the sim24 usage page.
-
-Primary method:
-
-1. Look for `.e-data_usage_meter-data_total[role='progressbar']`.
-2. Read `aria-valuenow` as used KB.
-3. Read `aria-valuemax` as total KB.
-
-Fallback method:
-
-1. Read visible text such as `98,30 GB`.
-2. Parse German decimal formatting.
-3. Convert GB into KB.
-
-Return contract:
-
-1. Returns `(used_kb, total_kb)`.
-2. Returns `(None, None)` when both methods fail.
-
-#### `decision_engine.py`
-
-Encapsulates the booking rule.
-
-Current effective threshold in the application is `0.5 GB`.
-
-Rule:
-
-```text
-book if remaining_gb < threshold_gb
-```
-
-#### `booking.py`
-
-Owns the booking sequence once the decision engine says booking is needed.
-
-Current flow:
-
-1. Find the booking button using multiple selectors.
-2. Remove disabled state with JavaScript if needed.
-3. Click the booking button while listening for the `getChangeServiceInfo` response.
-4. Parse the returned HTML for the activation URL and form id.
-5. Dismiss cookie consent if it appears.
-6. Solve captcha if a pre-activation captcha appears.
-7. Trigger activation using parsed HTML.
-8. If that fails, fall back to a direct `changeService` call.
-9. Check whether the server returned a post-activation captcha.
-10. Verify booking outcome by inspecting page content, dialogs, and URL hints.
-
-Other implementation details:
-
-1. Keeps an internal trace log for debugging.
-2. Sends Telegram alerts with the trace when booking fails or the outcome is unclear.
-3. Uses screenshots for debug situations.
-
-#### `captcha_handler.py`
-
-Provides human-assisted captcha resolution.
-
-Current behavior:
-
-1. Detect captcha images using several selectors.
-2. Capture a focused screenshot when possible.
-3. Send the image to Telegram.
-4. Wait up to 180 seconds for a reply.
-5. Enter the provided text into the captcha field.
-6. Click the activation button.
-7. Detect wrong-code messages.
-8. Optionally reload the captcha and retry up to 3 times.
-
-This module is used by both login and booking flows.
-
-#### `telegram_notify.py`
-
-Thin async Telegram Bot API client.
-
-Responsibilities:
-
-1. Send Markdown messages.
-2. Send photo uploads.
-3. Long-poll `getUpdates` for replies.
-4. Ignore messages from chats other than the configured chat id.
-5. Skip old updates before starting a reply wait.
-
-### Control runtime
-
-#### `scheduler_bot/bot.py`
-
-The control bot is a separate process from the booking pipeline.
-
-Supported commands:
-
-1. `/interval <minutes>`
-2. `/status`
-3. `/help`
-4. `/book`
-
-Behavior:
-
-1. Only the configured Telegram chat is authorized.
-2. `/interval` writes `interval_minutes` into the Gist.
-3. `/status` reads interval and `last_run_ts` from the Gist.
-4. `/book` triggers the GitHub Actions workflow through the GitHub API.
-5. Unknown messages are ignored.
-
-Important current requirement:
-
-`/book` does not only need Gist access. The token used by the bot must also be able to dispatch the repository workflow.
-
-### Local and test surfaces
-
-#### `test_local.py`
-
-Manual local runner with four modes:
-
-1. `telegram`
-2. `login`
-3. `data`
-4. `full`
-
-What each mode does:
-
-1. `telegram`: verifies Telegram messaging only.
-2. `login`: runs a real login through Playwright.
-3. `data`: logs in and reads actual usage data.
-4. `full`: performs a full dry run without clicking the booking action.
-
-#### `tests/test_main_workflow.py`
-
-Automated unit tests for the main orchestration path.
-
-Currently covered scenarios:
-
-1. Booking occurs when remaining data is below threshold.
-2. Booking does not occur when remaining data is above threshold.
-3. Login failure is reported and state is updated.
-
-This is currently the only automated test file in the repository.
-
-## External Services And Dependencies
-
-### External services
-
-1. sim24 portal for login, usage reading, and booking.
-2. Telegram Bot API for messaging and captcha replies.
-3. GitHub Gist as the persistent state store.
-4. GitHub Actions as the scheduled execution environment.
-5. An always-on host for the control bot.
-
-### Python dependencies
-
-Main runtime dependencies from `requirements.txt`:
-
-```text
-playwright==1.44.0
-aiohttp==3.9.5
-requests==2.32.3
-python-dotenv==1.0.1
-```
-
-Control bot dependencies from `scheduler_bot/requirements_bot.txt`:
-
-```text
-aiohttp==3.9.5
-requests==2.32.3
-```
-
-### Browser automation stack
-
-1. Playwright async API.
-2. Chromium in CI.
-3. Optional Edge locally via `USE_EDGE=true`.
-4. Selector-based DOM automation with JavaScript fallbacks.
-
-## Setup
-
-### 1. Telegram bot
-
-1. Create a bot with `@BotFather`.
-2. Save the bot token.
-3. Get your Telegram chat id.
-4. Start a conversation with the bot.
-
-### 2. GitHub Gist state store
-
-Create a secret gist with filename `sim24_bot_config.json` and content like:
-
-```json
-{
-  "interval_minutes": 30,
-  "last_run_ts": 0
-}
-```
-
-### 3. GitHub token
-
-The token must match how you use the project:
-
-1. For Gist read/write only: gist permissions are enough.
-2. If you also use `/book` from the control bot: the token must additionally be allowed to dispatch the repository workflow.
-
-### 4. GitHub Actions secrets
-
-Set these repository secrets:
-
-| Secret Name | Purpose |
+| Secret | Purpose |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
-| `TELEGRAM_CHAT_ID` | Authorized Telegram chat id |
+| `TELEGRAM_CHAT_ID` | Authorized chat id |
 | `SIM24_USERNAME` | sim24 username or phone number |
 | `SIM24_PASSWORD` | sim24 online password |
-| `GIST_TOKEN` | Token injected into `GIST_TOKEN` |
-| `GIST_ID` | Gist id injected into `GIST_ID` |
+| `GEMINI_API_KEY` | Gemini AI captcha solver |
+| `GIST_TOKEN` | Gist PAT |
+| `GIST_ID` | Gist id |
 
-### 5. Local `.env`
+### 6. Local `.env`
 
-Copy `.env.example` to `.env` and fill in:
+Copy `.env.example` to `.env` and fill in all values:
 
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 SIM24_USERNAME=your_username_or_phone_number
 SIM24_PASSWORD=your_online_password
+GEMINI_API_KEY=your_gemini_key_here
 GIST_TOKEN=ghp_your_gist_token
 GIST_ID=your_gist_id_here
-USE_EDGE=true
+GITHUB_PAT=ghp_your_pat_with_workflow_scope
+USE_EDGE=true      # use local Edge instead of Playwright Chromium
 ```
 
-### 6. Control bot environment
-
-For `scheduler_bot/bot.py`, configure:
-
-1. `TELEGRAM_BOT_TOKEN`
-2. `TELEGRAM_CHAT_ID`
-3. `GIST_TOKEN`
-4. `GIST_ID`
-
-Optional overrides used by `/book`:
-
-1. `GITHUB_REPO_OWNER` defaults to `amirwebd3v`
-2. `GITHUB_REPO_NAME` defaults to `Automation-Booking-System`
-3. `GITHUB_WORKFLOW_FILE` defaults to `check_data.yml`
-4. `GITHUB_WORKFLOW_REF` defaults to `main`
-
-## How Scheduling Works Right Now
-
-There are two scheduling layers:
-
-1. GitHub Actions cron in `.github/workflows/check_data.yml`.
-2. The interval gate stored in the Gist and enforced in `main.py`.
-
-Current actual cron schedule:
-
-```text
-*/30 * * * *
-```
-
-That means the workflow wakes up every 30 minutes, then `main.py` decides whether enough time has elapsed based on `interval_minutes`.
-
-Important consequence:
-
-If you set `/interval 5`, the code accepts it, but GitHub Actions still only wakes up every 30 minutes. So the effective minimum execution cadence is currently 30 minutes unless the workflow is triggered manually.
-
-## Captcha Flow
-
-When sim24 shows a captcha during login or booking:
-
-1. The captcha image is detected in the browser.
-2. A screenshot is sent to Telegram.
-3. The user replies with the captcha text.
-4. The bot enters that text into the page.
-5. The workflow continues.
-6. If the captcha is wrong, the handler can reload and retry.
-7. If no reply arrives within 3 minutes, that booking attempt is aborted.
-
-## Execution Flow In Detail
-
-### Normal booking pipeline
-
-1. GitHub Actions starts `main.py`.
-2. `ConfigManager` loads environment variables and Gist state.
-3. `is_time_to_run()` checks elapsed time.
-4. `TelegramNotifier` is created.
-5. `Sim24Login.login()` launches the browser and logs in.
-6. The data-usage page is opened.
-7. `DataChecker.get_usage()` returns used and total KB.
-8. `main.py` converts those values to GB.
-9. `DecisionEngine.should_book()` evaluates the threshold.
-10. A Telegram status message is sent.
-11. If booking is needed, `BookingModule.book_2gb_packet()` runs.
-12. The Gist timestamp is updated.
-13. The browser is closed.
-
-### Failure behavior
-
-The project generally handles failures by:
-
-1. Printing diagnostic output.
-2. Sending a Telegram message when possible.
-3. Updating `last_run_ts` in many failure cases.
-4. Letting the next scheduled run retry later.
-
-## Testing And Validation Surfaces
-
-### Manual local checks
-
-Install dependencies:
+### 7. Run the Telegram control bot
 
 ```bash
-pip install -r requirements.txt
+python -m scheduler_bot.bot
 ```
 
-Run the manual helper:
+The bot calls `deleteWebhook` on start, clears stale queued messages, then begins long-polling.
+
+### 8. Deploy the Cloudflare Worker (optional)
+
+If you prefer the webhook approach or want the hourly cron without keeping a local process running:
 
 ```bash
-python test_local.py --test telegram
-python test_local.py --test login
-python test_local.py --test data
-python test_local.py --test full
+cd cloudflare_trigger
+wrangler deploy
+wrangler secret put GITHUB_PAT
+wrangler secret put GIST_TOKEN
+# ... add all required secrets
 ```
+
+## Captcha Handling
+
+```
+Captcha detected on page
+    └─ Gemini 1.5 Flash reads image → enters solution
+          ├─ Correct → continue
+          └─ Wrong → reload + retry (up to 3 attempts)
+                └─ All attempts fail
+                       └─ Screenshot sent to Telegram
+                              └─ Wait up to 5 minutes for human reply
+                                     ├─ Reply received → enter code, continue
+                                     └─ Timeout → raise CaptchaSolveError → pipeline aborts
+```
+
+## Testing
 
 ### Automated tests
 
-Automated orchestration tests live in `tests/test_main_workflow.py`.
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -m "not live and not destructive"
+```
 
-At the time this README was updated, editor diagnostics were clean, but the local virtual environment used for inspection had broken pytest or pip metadata, so that environment could not execute pytest normally. That was an environment issue observed during inspection, not a confirmed repository code failure.
+Test files and what they cover:
 
-## Known Current Mismatches And Caveats
+| File | Covers |
+|---|---|
+| `test_booking.py` | Button detection, modal activation, captcha handling in booking |
+| `test_captcha_handler.py` | Gemini solve path, Aktivieren click |
+| `test_config_manager.py` | Gist load, fallback defaults, state persistence |
+| `test_data_checker.py` | ARIA method, text fallback, German decimal parsing |
+| `test_decision_engine.py` | Threshold logic |
+| `test_live_workflow.py` | Real Telegram, real login, real data read (requires `.env`) |
+| `test_login.py` | Session reuse, fresh login fallback, captcha retry limit |
+| `test_main_alerts.py` | `_build_run_summary`, error alert with screenshot |
+| `test_main_workflow.py` | Full orchestration: booking path, skip path, login failure |
+| `test_scheduler_bot.py` | Status format, all button handlers, auth checks, env fallbacks |
+| `test_telegram_notify.py` | `send`, `send_photo`, transport failures |
 
-These points reflect the repository as it currently exists:
+### Live integration tests
 
-1. The GitHub Actions workflow runs every 30 minutes, not every 5 minutes.
-2. The control bot accepts intervals smaller than 30 minutes, but cron still limits actual unattended runs to every 30 minutes.
-3. The control bot's `/book` command requires workflow-dispatch permissions in addition to Gist access.
-4. `config_manager.py` comments describe `last_run_ts` as the last successful run, but `main.py` updates it on several failure paths too.
-5. `decision_engine.py` comments mention a default threshold of 1.5 GB, but the actual constructor default and main runtime behavior use 0.5 GB.
-6. `test_local.py` still contains older comments referring to a `src` directory, while the repository is currently flat at the root.
-7. Most sim24 automation is selector-driven and therefore sensitive to portal markup changes.
-8. The repository currently has one automated test file, focused on orchestration rather than full browser behavior.
+Require real credentials in `.env`:
 
-## Onboarding Summary
+```bash
+python -m pytest tests/test_live_workflow.py -m "live and not destructive" -v
+```
 
-If you are new to this project, the most important mental model is:
+### Manual local runner
 
-1. `main.py` is the real production pipeline.
-2. `scheduler_bot/bot.py` only controls timing and manual triggering.
-3. The GitHub Gist is the shared persistence layer.
-4. Playwright selectors are the fragile integration point.
-5. Telegram is both the alerting channel and the human fallback for captcha.
-6. The system always performs a fresh login instead of reusing sessions.
+Runs each module against the real sim24 site and your Telegram:
+
+```bash
+python test_local.py --test telegram   # verify Telegram connectivity
+python test_local.py --test login      # real Playwright login
+python test_local.py --test data       # login + read data usage
+python test_local.py --test full       # full dry run (no booking button clicked)
+```
+
+## External Services
+
+| Service | Role |
+|---|---|
+| sim24 portal (`service.sim24.de`) | Login, usage reading, booking |
+| Telegram Bot API | Notifications, captcha relay, control bot |
+| GitHub Gist | Shared persistent state (timestamps, captcha, interval) |
+| GitHub Actions | Scheduled booking pipeline execution environment |
+| Cloudflare Workers | Reliable hourly cron trigger + optional webhook entry point |
+| Google Gemini API | Autonomous captcha image recognition |
+
+## Dependencies
+
+**Runtime** (`requirements.txt`):
+
+```
+playwright==1.44.0
+playwright-stealth==1.0.6
+google-generativeai==0.8.5
+aiohttp==3.9.5
+requests==2.32.3
+python-dotenv==1.0.1
+```
+
+**Development** (`requirements-dev.txt`):
+
+```
+-r requirements.txt
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+ruff>=0.6.0
+```
+
+The `scheduler_bot` uses only `aiohttp` and `python-dotenv`, both already in `requirements.txt`.
+No separate bot requirements file is needed.
