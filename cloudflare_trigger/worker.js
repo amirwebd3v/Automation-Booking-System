@@ -80,10 +80,10 @@ export default {
 
     if (command === "/start") {
       await handleStart(env, chatId);
-    } else if (command === "/book") {
+    } else if (command === "/book" || text === "📦 Book Now") {
       // Reply to Telegram immediately (5 s window), then trigger workflow asynchronously
       ctx.waitUntil(handleBook(env, chatId));
-    } else if (command === "/status") {
+    } else if (command === "/status" || text === "📊 Status") {
       await handleStatus(env, chatId);
     } else if (text && !text.startsWith("/")) {
       // Plain text — could be a captcha reply; check Gist before acting
