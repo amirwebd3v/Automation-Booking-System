@@ -26,7 +26,14 @@ def test_load_state_from_gist(config_env, monkeypatch):
             return {
                 "files": {
                     ConfigManager.GIST_FILENAME: {
-                        "content": json.dumps({"interval_minutes": 25, "last_run_ts": 123.4})
+                        "content": json.dumps({
+                            "interval_minutes": 25,
+                            "last_run_ts": 123.4,
+                            "last_run_ok": False,
+                            "last_run_error": "login failed",
+                            "last_used_kb": 111,
+                            "last_total_kb": 222,
+                        })
                     }
                 }
             }
@@ -41,8 +48,12 @@ def test_load_state_from_gist(config_env, monkeypatch):
 
     manager = ConfigManager()
 
-    assert manager.interval_minutes == 25
     assert manager.last_run_ts == 123.4
+    assert manager._state["last_run_ok"] is False
+    assert manager._state["last_run_error"] == "login failed"
+    assert manager._state["last_used_kb"] == 111
+    assert manager._state["last_total_kb"] == 222
+    assert "interval_minutes" not in manager._state
     assert requested["url"] == "https://api.github.com/gists/gist-id"
     assert requested["headers"]["Authorization"] == "Bearer gist-token"
     assert requested["timeout"] == 10
@@ -56,11 +67,14 @@ def test_load_state_falls_back_to_defaults_on_error(config_env, monkeypatch):
 
     manager = ConfigManager()
 
-    assert manager.interval_minutes == 10
     assert manager.last_run_ts == 0
+    assert manager._state["last_run_ok"] is True
+    assert manager._state["last_run_error"] == ""
+    assert manager._state["last_used_kb"] is None
+    assert manager._state["last_total_kb"] is None
 
 
-def test_update_last_run_and_set_interval_persist_state(config_env, monkeypatch):
+def test_record_run_persists_status_fields_and_drops_interval_key(config_env, monkeypatch):
     saved = []
 
     class FakeResponse:
@@ -93,11 +107,60 @@ def test_update_last_run_and_set_interval_persist_state(config_env, monkeypatch)
     monkeypatch.setattr("config_manager.time.time", lambda: 456.7)
 
     manager = ConfigManager()
-    manager.update_last_run()
-    manager.set_interval(2)
+    manager.record_run(success=False, error="boom", used_kb=111, total_kb=222)
 
-    assert len(saved) == 2
-    assert saved[0]["payload"]["files"][ConfigManager.GIST_FILENAME]["content"]
+    assert len(saved) == 1
+    saved_state = json.loads(saved[0]["payload"]["files"][ConfigManager.GIST_FILENAME]["content"])
     assert manager.last_run_ts == 456.7
-    assert manager.interval_minutes == 5
+    assert saved_state["last_run_ts"] == 456.7
+    assert saved_state["last_run_ok"] is False
+    assert saved_state["last_run_error"] == "boom"
+    assert saved_state["last_used_kb"] == 111
+    assert saved_state["last_total_kb"] == 222
+    assert "interval_minutes" not in saved_state
     assert all(call["url"] == "https://api.github.com/gists/gist-id" for call in saved)
+
+
+def test_record_usage_snapshot_persists_latest_known_data(config_env, monkeypatch):
+    saved = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "files": {
+                    ConfigManager.GIST_FILENAME: {
+                        "content": json.dumps({
+                            "last_run_ts": 123.4,
+                            "last_used_kb": 111,
+                            "last_total_kb": 222,
+                        })
+                    }
+                }
+            }
+
+    def fake_get(url, headers, timeout):
+        return FakeResponse()
+
+    def fake_patch(url, headers, json, timeout):
+        payload = json
+        saved.append(__import__("json").loads(payload["files"][ConfigManager.GIST_FILENAME]["content"]))
+        return FakeResponse()
+
+    monkeypatch.setattr("config_manager.requests.get", fake_get)
+    monkeypatch.setattr("config_manager.requests.patch", fake_patch)
+
+    manager = ConfigManager()
+    manager.record_usage_snapshot(used_kb=333, total_kb=444)
+
+    assert saved == [{
+        "last_run_ts": 123.4,
+        "last_run_ok": True,
+        "last_run_error": "",
+        "last_used_kb": 333,
+        "last_total_kb": 444,
+        "captcha_pending": False,
+        "captcha_reply": "",
+    }]

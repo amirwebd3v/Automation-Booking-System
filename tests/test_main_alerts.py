@@ -50,6 +50,8 @@ async def test_main_sends_photo_alert_when_captcha_solver_fails(monkeypatch):
         "messages": [],
         "captions": [],
         "browser": None,
+        "recorded": None,
+        "snapshot": None,
     }
 
     class FakeConfig:
@@ -59,13 +61,20 @@ async def test_main_sends_photo_alert_when_captcha_solver_fails(monkeypatch):
             self.sim24_username = "user"
             self.sim24_password = "pass"
             self.last_run_ts = 0
-            self.interval_minutes = 30
 
-        def is_time_to_run(self):
-            return True
+        def record_run(self, *, success, error="", used_kb=None, total_kb=None):
+            state["recorded"] = {
+                "success": success,
+                "error": error,
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
 
-        def update_last_run(self):
-            return None
+        def record_usage_snapshot(self, *, used_kb, total_kb):
+            state["snapshot"] = {
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
 
     class RecordingTelegram:
         def __init__(self, token, chat_id):
@@ -113,4 +122,7 @@ async def test_main_sends_photo_alert_when_captcha_solver_fails(monkeypatch):
     await workflow_main.main()
 
     assert state["browser"].closed is True
+    assert state["recorded"]["success"] is False
+    assert "CAPTCHA could not be solved" in state["recorded"]["error"]
+    assert state["snapshot"] is not None
     assert any("CAPTCHA could not be solved" in caption for caption in state["captions"])

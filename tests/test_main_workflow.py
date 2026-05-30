@@ -27,6 +27,8 @@ class FakeBrowser:
 async def test_full_workflow_books_when_below_threshold(monkeypatch):
     state = {
         "updated": False,
+        "recorded": None,
+        "snapshot": None,
         "booking_called": False,
         "browser": None,
         "messages": [],
@@ -39,13 +41,21 @@ async def test_full_workflow_books_when_below_threshold(monkeypatch):
             self.sim24_username = "user"
             self.sim24_password = "pass"
             self.last_run_ts = 0
-            self.interval_minutes = 30
 
-        def is_time_to_run(self):
-            return True
-
-        def update_last_run(self):
+        def record_run(self, *, success, error="", used_kb=None, total_kb=None):
             state["updated"] = True
+            state["recorded"] = {
+                "success": success,
+                "error": error,
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
+
+        def record_usage_snapshot(self, *, used_kb, total_kb):
+            state["snapshot"] = {
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
 
     class FakeTelegram:
         def __init__(self, token, chat_id):
@@ -97,6 +107,12 @@ async def test_full_workflow_books_when_below_threshold(monkeypatch):
 
     assert state["booking_called"] is True
     assert state["updated"] is True
+    assert state["recorded"]["success"] is True
+    assert state["recorded"]["error"] == ""
+    assert state["snapshot"] == {
+        "used_kb": state["recorded"]["used_kb"],
+        "total_kb": state["recorded"]["total_kb"],
+    }
     assert state["browser"] is not None and state["browser"].closed is True
     assert any("Run complete" in msg for msg in state["messages"])
     assert any("2 GB packet booked successfully" in msg for msg in state["messages"])
@@ -106,6 +122,8 @@ async def test_full_workflow_books_when_below_threshold(monkeypatch):
 async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
     state = {
         "updated": False,
+        "recorded": None,
+        "snapshot": None,
         "booking_constructed": False,
         "messages": [],
     }
@@ -117,13 +135,21 @@ async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
             self.sim24_username = "user"
             self.sim24_password = "pass"
             self.last_run_ts = 0
-            self.interval_minutes = 30
 
-        def is_time_to_run(self):
-            return True
-
-        def update_last_run(self):
+        def record_run(self, *, success, error="", used_kb=None, total_kb=None):
             state["updated"] = True
+            state["recorded"] = {
+                "success": success,
+                "error": error,
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
+
+        def record_usage_snapshot(self, *, used_kb, total_kb):
+            state["snapshot"] = {
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
 
     class FakeTelegram:
         def __init__(self, token, chat_id):
@@ -170,6 +196,9 @@ async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
 
     assert state["booking_constructed"] is False
     assert state["updated"] is True
+    assert state["recorded"]["success"] is True
+    assert state["recorded"]["error"] == ""
+    assert state["snapshot"] is not None
     assert any("Run complete" in msg for msg in state["messages"])
     assert any("No action needed" in msg for msg in state["messages"])
 
@@ -178,6 +207,8 @@ async def test_full_workflow_skips_booking_when_above_threshold(monkeypatch):
 async def test_full_workflow_reports_login_failure(monkeypatch):
     state = {
         "updated": False,
+        "recorded": None,
+        "snapshot": None,
         "messages": [],
     }
 
@@ -188,13 +219,21 @@ async def test_full_workflow_reports_login_failure(monkeypatch):
             self.sim24_username = "user"
             self.sim24_password = "pass"
             self.last_run_ts = 0
-            self.interval_minutes = 30
 
-        def is_time_to_run(self):
-            return True
-
-        def update_last_run(self):
+        def record_run(self, *, success, error="", used_kb=None, total_kb=None):
             state["updated"] = True
+            state["recorded"] = {
+                "success": success,
+                "error": error,
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
+
+        def record_usage_snapshot(self, *, used_kb, total_kb):
+            state["snapshot"] = {
+                "used_kb": used_kb,
+                "total_kb": total_kb,
+            }
 
     class FakeTelegram:
         def __init__(self, token, chat_id):
@@ -222,4 +261,7 @@ async def test_full_workflow_reports_login_failure(monkeypatch):
     await workflow_main.main()
 
     assert state["updated"] is True
+    assert state["recorded"]["success"] is False
+    assert "Login failed" in state["recorded"]["error"]
+    assert state["snapshot"] is None
     assert any("Login failed" in msg for msg in state["messages"])

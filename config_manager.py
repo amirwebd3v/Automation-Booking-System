@@ -6,22 +6,33 @@ Stores and retrieves dynamic state via a GitHub Gist so values persist
 across GitHub Actions runs.
 
 Gist state keys:
-  interval_minutes  — minimum minutes between booking pipeline runs
-  last_run_ts       — Unix timestamp of the last completed run
-  captcha_pending   — True while waiting for a human captcha reply
-  captcha_reply     — text entered by the human; consumed by captcha_handler
+    last_run_ts       — Unix timestamp of the last completed run
+    last_run_ok       — whether the last run completed successfully
+    last_run_error    — human-readable error text for the last failed run
+    last_used_kb      — last known used data volume in KB
+    last_total_kb     — last known total data volume in KB
+    captcha_pending   — True while waiting for a human captcha reply
+    captcha_reply     — text entered by the human; consumed by captcha_handler
 """
 
 import os
 import json
 import time
 import requests
-from datetime import datetime, timezone
 
 
 class ConfigManager:
     # ── Gist file name used as our tiny key-value store ──────────────────────
     GIST_FILENAME = "sim24_bot_config.json"
+    DEFAULT_STATE = {
+        "last_run_ts": 0,
+        "last_run_ok": True,
+        "last_run_error": "",
+        "last_used_kb": None,
+        "last_total_kb": None,
+        "captcha_pending": False,
+        "captcha_reply": "",
+    }
 
     def __init__(self):
         # Required secrets (set in GitHub Actions → Secrets)
@@ -33,42 +44,49 @@ class ConfigManager:
         self.gist_id          = os.environ["GIST_ID"]
 
         # Load dynamic config from Gist
-        self._state = self._load_state()
+        self._state = self._normalize_state(self._load_state())
 
     # ── Public properties ─────────────────────────────────────────────────────
-
-    @property
-    def interval_minutes(self) -> int:
-        return int(self._state.get("interval_minutes", 10))
 
     @property
     def last_run_ts(self) -> float:
         return float(self._state.get("last_run_ts", 0))
 
-    # ── Timing logic ──────────────────────────────────────────────────────────
-
-    def is_time_to_run(self) -> bool:
-        """Returns True if enough time has elapsed since last successful run."""
-        now = time.time()
-        elapsed_seconds = now - self.last_run_ts
-        required_seconds = self.interval_minutes * 60
-        return elapsed_seconds >= required_seconds
-
     def update_last_run(self):
-        """Saves current timestamp as last_run to Gist."""
-        self._state["last_run_ts"] = time.time()
-        try:
-            self._save_state()
-        except Exception:
-            pass  # Non-critical; a missed timestamp is acceptable
+        """Backwards-compatible helper that marks a run as completed successfully."""
+        self.record_run(success=True)
 
-    def set_interval(self, minutes: int):
-        """Called by scheduler bot to change check interval."""
-        self._state["interval_minutes"] = max(5, minutes)  # Minimum 5 min (default 10)
+    def record_run(
+        self,
+        *,
+        success: bool,
+        error: str = "",
+        used_kb: int | None = None,
+        total_kb: int | None = None,
+    ) -> None:
+        """Persist the latest workflow result for status reporting."""
+        self._state["last_run_ts"] = time.time()
+        self._state["last_run_ok"] = bool(success)
+        self._state["last_run_error"] = error or ""
+        if used_kb is not None:
+            self._state["last_used_kb"] = int(used_kb)
+        if total_kb is not None:
+            self._state["last_total_kb"] = int(total_kb)
+        self._state.pop("interval_minutes", None)
         try:
             self._save_state()
         except Exception:
-            pass  # Caller (scheduler bot) uses save_gist directly and handles errors itself
+            pass  # Non-critical; the workflow should not fail because status could not persist
+
+    def record_usage_snapshot(self, *, used_kb: int, total_kb: int) -> None:
+        """Persist the latest successfully read usage values for status reporting."""
+        self._state["last_used_kb"] = int(used_kb)
+        self._state["last_total_kb"] = int(total_kb)
+        self._state.pop("interval_minutes", None)
+        try:
+            self._save_state()
+        except Exception:
+            pass  # Best effort only; a later record_run call may still persist the snapshot
 
     def set_captcha_pending(self, pending: bool) -> None:
         """Signal the scheduler bot that a CAPTCHA is waiting for manual input."""
@@ -79,7 +97,7 @@ class ConfigManager:
 
     def get_captcha_reply(self) -> "str | None":
         """Reload Gist and return the captcha reply written by the scheduler bot."""
-        self._state = self._load_state()
+        self._state = self._normalize_state(self._load_state())
         return self._state.get("captcha_reply")
 
     def clear_captcha_state(self) -> None:
@@ -89,6 +107,34 @@ class ConfigManager:
         self._save_state()
 
     # ── Gist persistence ──────────────────────────────────────────────────────
+
+    @classmethod
+    def _default_state(cls) -> dict:
+        return dict(cls.DEFAULT_STATE)
+
+    @classmethod
+    def _normalize_state(cls, state: dict | None) -> dict:
+        normalized = cls._default_state()
+        if state:
+            normalized.update(state)
+
+        normalized.pop("interval_minutes", None)
+        normalized["last_run_ts"] = float(normalized.get("last_run_ts", 0) or 0)
+        normalized["last_run_ok"] = bool(normalized.get("last_run_ok", True))
+        normalized["last_run_error"] = str(normalized.get("last_run_error", "") or "")
+
+        for key in ("last_used_kb", "last_total_kb"):
+            value = normalized.get(key)
+            if value is None:
+                continue
+            try:
+                normalized[key] = int(float(value))
+            except (TypeError, ValueError):
+                normalized[key] = None
+
+        normalized["captcha_pending"] = bool(normalized.get("captcha_pending", False))
+        normalized["captcha_reply"] = str(normalized.get("captcha_reply", "") or "")
+        return normalized
 
     def _load_state(self) -> dict:
         """Fetch current config state from GitHub Gist."""
@@ -108,10 +154,7 @@ class ConfigManager:
             return json.loads(content)
         except Exception as e:
             print(f"[CONFIG] Could not load Gist state: {e}. Using defaults.")
-            return {
-                "interval_minutes": 10,
-                "last_run_ts": 0
-            }
+            return self._default_state()
 
     def _save_state(self):
         """Persist current state back to GitHub Gist."""

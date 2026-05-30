@@ -1,6 +1,5 @@
 """sim24 Auto Data Booker main entry point."""
 
-import time
 import asyncio
 from config_manager import ConfigManager
 from telegram_notify import TelegramNotifier
@@ -54,16 +53,13 @@ async def main():
 
     print("[START] Starting data check cycle.")
 
-    # ── Interval gate: only run full pipeline when enough time has elapsed ──
-    if not config.is_time_to_run():
-        elapsed = int((time.time() - config.last_run_ts) / 60)
-        print(f"[CONFIG] Skipping — interval not elapsed. "
-              f"Elapsed: {elapsed} min / {config.interval_minutes} min required.")
-        return
-
     browser = None
     page = None
     login_module = None
+    used_kb = None
+    total_kb = None
+    run_success = False
+    error_detail = ""
     try:
         login_module = Sim24Login(
             username=config.sim24_username,
@@ -73,6 +69,7 @@ async def main():
         browser, page = await login_module.login()
 
         if page is None:
+            error_detail = "Login failed. Check credentials or site availability."
             await telegram.send("❌ *Login failed.* Check credentials or site availability.")
             return
 
@@ -82,8 +79,11 @@ async def main():
         used_kb, total_kb = await checker.get_usage()
 
         if used_kb is None:
+            error_detail = "Could not read data usage. Page structure may have changed."
             await telegram.send("❌ *Could not read data usage.* Page structure may have changed.")
             return
+
+        config.record_usage_snapshot(used_kb=used_kb, total_kb=total_kb)
 
         used_gb  = used_kb  / (1024 * 1024)
         total_gb = total_kb / (1024 * 1024)
@@ -98,10 +98,15 @@ async def main():
             booker = BookingModule(page, telegram, config)
             booking_success = await booker.book_2gb_packet()
 
+        run_success = (not should_book) or (booking_success is True)
+        if should_book and booking_success is False:
+            error_detail = "Booking attempted but did not succeed."
+
         await telegram.send(_build_run_summary(used_gb, remaining_gb, total_gb, should_book, booking_success))
 
 
     except CaptchaSolveError as e:
+        error_detail = f"CAPTCHA could not be solved after 3 attempts: {str(e)}"
         print(f"[CAPTCHA] {e}")
         await _send_error_alert(
             telegram,
@@ -109,12 +114,18 @@ async def main():
             page,
         )
     except Exception as e:
+        error_detail = f"Unexpected error: {str(e)}"
         error_msg = f"💥 *Unexpected error:*\n`{str(e)}`"
         print(f"[ERROR] {e}")
         await _send_error_alert(telegram, error_msg, page)
 
     finally:
-        config.update_last_run()
+        config.record_run(
+            success=run_success,
+            error=error_detail,
+            used_kb=used_kb,
+            total_kb=total_kb,
+        )
         if browser:
             await browser.close()
         pw = getattr(login_module, "_playwright", None)

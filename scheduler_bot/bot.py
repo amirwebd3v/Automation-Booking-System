@@ -6,7 +6,7 @@ Runs as a long-poll process alongside the GitHub Actions pipeline.
 Keyboard UX:
   Reply keyboard (persistent bar): [📊 Status]  [📦 Book Now]
 
-  📊 Status  → shows last-run time + captcha flag
+    📊 Status  → shows last run, next automatic run, last error, used data, total data
                + inline buttons [🔄 Refresh] [📦 Book Now]
 
   📦 Book Now → dispatches the GitHub Actions check_data.yml workflow
@@ -25,8 +25,9 @@ Required environment variables:
 import asyncio
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from dotenv import load_dotenv
@@ -38,6 +39,7 @@ REPO          = "Automation-Booking-System"
 WORKFLOW      = "check_data.yml"
 BRANCH        = "main"
 GIST_FILENAME = "sim24_bot_config.json"
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 TG_BASE = "https://api.telegram.org/bot{token}/{method}"
 
@@ -212,23 +214,52 @@ class Sim24Bot:
     # ── Status helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _format_status(state: dict) -> str:
+    def _minutes_until_next_run(now: datetime | None = None) -> int:
+        now = now or datetime.now(timezone.utc)
+        next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        remaining_seconds = max(0, int((next_run - now).total_seconds()))
+        return max(1, (remaining_seconds + 59) // 60)
+
+    @staticmethod
+    def _format_data_volume(kb: int | None) -> str:
+        if kb is None:
+            return "Not yet recorded"
+        return f"{kb / (1024 * 1024):.2f} GB"
+
+    @staticmethod
+    def _format_berlin_timestamp(ts: float) -> str:
+        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone(BERLIN_TZ)
+        return f"{dt.strftime('%Y-%m-%d %H:%M %Z')} (Europe/Berlin)"
+
+    @staticmethod
+    def _escape_markdown(text: str) -> str:
+        escaped = text.replace("\\", "\\\\")
+        for char in ("`", "*", "_", "["):
+            escaped = escaped.replace(char, f"\\{char}")
+        return escaped
+
+    @classmethod
+    def _format_status(cls, state: dict, now: datetime | None = None) -> str:
         ts = state.get("last_run_ts", 0)
         if ts:
-            dt       = datetime.fromtimestamp(float(ts), tz=timezone.utc)
-            last_run = dt.strftime("%Y-%m-%d %H:%M UTC")
+            last_run = cls._format_berlin_timestamp(float(ts))
         else:
             last_run = "Never"
 
-        captcha = (
-            "⚠️ Waiting for your reply"
-            if state.get("captcha_pending")
-            else "✅ None"
-        )
+        error = "None"
+        if state.get("last_run_ok") is False:
+            error = state.get("last_run_error") or "Last run did not complete successfully."
+
+        next_run_minutes = cls._minutes_until_next_run(now)
+        used_data = cls._format_data_volume(state.get("last_used_kb"))
+        total_data = cls._format_data_volume(state.get("last_total_kb"))
         return (
             "📊 *Bot Status*\n\n"
             f"🕑 *Last Run:* `{last_run}`\n"
-            f"🔐 *Captcha:* {captcha}"
+            f"⏱️ *Next Run In:* `{next_run_minutes} min`\n"
+            f"❌ *Error:* {cls._escape_markdown(error)}\n"
+            f"📈 *Used Data:* `{used_data}`\n"
+            f"📦 *Total Data:* `{total_data}`"
         )
 
     # ── Command / button handlers ─────────────────────────────────────────────
@@ -237,7 +268,7 @@ class Sim24Bot:
         await self._send(
             "👋 *sim24 Auto Booker*\n\n"
             "Use the buttons below to check status or trigger a booking.\n\n"
-            "• *📊 Status* — shows last run time and captcha state\n"
+            "• *📊 Status* — shows last run, next automatic run, error, used data, and total data\n"
             "• *📦 Book Now* — dispatches the GitHub Actions workflow immediately",
             reply_markup=_REPLY_KEYBOARD,
         )

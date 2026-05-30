@@ -83,15 +83,16 @@ Automation-Booking-System/
 Entry point for one pipeline run.
 
 1. Instantiates `ConfigManager` and `TelegramNotifier`.
-2. Skips early if `is_time_to_run()` returns `False`.
-3. Calls `Sim24Login.login()` → returns `(browser, page)`.
-4. Calls `DataChecker.get_usage()` → returns `(used_kb, total_kb)`.
-5. Calls `DecisionEngine.should_book(remaining_gb)`.
-6. If booking is needed, calls `BookingModule.book_2gb_packet()`.
-7. Sends a run summary via `_build_run_summary()` → always includes "Run complete" + action taken.
-8. On `CaptchaSolveError` or unexpected exceptions: sends a photo alert with a screenshot.
-9. Calls `config.update_last_run()` in `finally` regardless of outcome.
-10. Closes the browser and stops Playwright in `finally`.
+2. Calls `Sim24Login.login()` → returns `(browser, page)`.
+3. Calls `DataChecker.get_usage()` → returns `(used_kb, total_kb)`.
+4. Calls `DecisionEngine.should_book(remaining_gb)`.
+5. If booking is needed, calls `BookingModule.book_2gb_packet()`.
+6. Sends a run summary via `_build_run_summary()` → always includes "Run complete" + action taken.
+7. On `CaptchaSolveError` or unexpected exceptions: sends a photo alert with a screenshot.
+8. Calls `config.record_run(...)` in `finally` to persist last-run time, success/error state, and the latest known usage values.
+9. Closes the browser and stops Playwright in `finally`.
+
+All persisted timestamps are stored in UTC and converted to `Europe/Berlin` only when shown in Telegram status messages.
 
 #### `config_manager.py`
 
@@ -112,8 +113,11 @@ State stored in `sim24_bot_config.json` inside the Gist:
 
 ```json
 {
-  "interval_minutes": 10,
   "last_run_ts": 0,
+   "last_run_ok": true,
+   "last_run_error": "",
+   "last_used_kb": null,
+   "last_total_kb": null,
   "captcha_pending": false,
   "captcha_reply": ""
 }
@@ -121,7 +125,7 @@ State stored in `sim24_bot_config.json` inside the Gist:
 
 `captcha_pending` / `captcha_reply` are written by the booking pipeline and read by the Cloudflare Worker captcha relay when Gemini fails and a human reply is needed.
 
-If Gist loading fails, falls back to `interval_minutes=10, last_run_ts=0`.
+If Gist loading fails, falls back to empty last-run metadata plus `last_run_ts=0`.
 
 #### `login.py`
 
@@ -192,7 +196,7 @@ Reply keyboard (persistent bar shown to the authorized user):
 [ 📊 Status ]  [ 📦 Book Now ]
 ```
 
-- **📊 Status** — reads the Gist and sends last-run time + captcha state with inline buttons `[🔄 Refresh]` `[📦 Book Now]`.
+- **📊 Status** — reads the Gist and sends last run, minutes until the next hourly Cloudflare cron run, last error, used data, and total data, with inline buttons `[🔄 Refresh]` `[📦 Book Now]`.
 - **🔄 Refresh** (inline) — edits the status message in place with fresh Gist data.
 - **📦 Book Now** — dispatches the GitHub Actions `check_data.yml` workflow immediately.
 - **Plain text while `captcha_pending`** — saves the captcha reply to the Gist so the pipeline can pick it up.
@@ -252,8 +256,11 @@ Create a **secret** Gist with filename `sim24_bot_config.json`:
 
 ```json
 {
-  "interval_minutes": 10,
-  "last_run_ts": 0
+   "last_run_ts": 0,
+   "last_run_ok": true,
+   "last_run_error": "",
+   "last_used_kb": null,
+   "last_total_kb": null
 }
 ```
 

@@ -1,6 +1,7 @@
 """Tests for scheduler_bot/bot.py."""
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -27,22 +28,53 @@ def bot():
 
 def test_format_status_never_run():
     from scheduler_bot.bot import Sim24Bot
-    text = Sim24Bot._format_status({"last_run_ts": 0})
+    text = Sim24Bot._format_status(
+        {"last_run_ts": 0},
+        now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
+    )
     assert "Never" in text
-    assert "✅ None" in text
+    assert "26 min" in text
+    assert "Error:* None" in text
+    assert "Used Data" in text
+    assert "Total Data" in text
 
 
 def test_format_status_with_timestamp():
     from scheduler_bot.bot import Sim24Bot
-    text = Sim24Bot._format_status({"last_run_ts": 1_700_000_000.0})
-    assert "2023" in text  # timestamp 1_700_000_000 is in 2023
-    assert "✅ None" in text
+    text = Sim24Bot._format_status(
+        {
+            "last_run_ts": 1_700_000_000.0,
+            "last_used_kb": int(128.28 * 1024 * 1024),
+            "last_total_kb": 130 * 1024 * 1024,
+        },
+        now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
+    )
+    assert "2023-11-14 23:13 CET (Europe/Berlin)" in text
+    assert "26 min" in text
+    assert "128.28 GB" in text
+    assert "130.00 GB" in text
 
 
-def test_format_status_captcha_pending():
+def test_format_status_without_saved_data_explains_missing_snapshot():
     from scheduler_bot.bot import Sim24Bot
-    text = Sim24Bot._format_status({"last_run_ts": 0, "captcha_pending": True})
-    assert "Waiting for your reply" in text
+    text = Sim24Bot._format_status(
+        {"last_run_ts": 0},
+        now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
+    )
+    assert "Not yet recorded" in text
+
+
+def test_format_status_failed_run_shows_error_and_reason():
+    from scheduler_bot.bot import Sim24Bot
+    text = Sim24Bot._format_status(
+        {
+            "last_run_ts": 0,
+            "last_run_ok": False,
+            "last_run_error": "Login failed. Site unavailable.",
+        },
+        now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
+    )
+    assert "Login failed. Site unavailable." in text
 
 
 # ── _on_start ─────────────────────────────────────────────────────────────────

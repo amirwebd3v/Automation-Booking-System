@@ -179,13 +179,8 @@ async def test_live_full_workflow_safe(monkeypatch, tmp_path):
             self.telegram_chat_id = env["TELEGRAM_CHAT_ID"]
             self.sim24_username = env["SIM24_USERNAME"]
             self.sim24_password = env["SIM24_PASSWORD"]
-            self.last_run_ts = 0
-            self.interval_minutes = 0
 
-        def is_time_to_run(self):
-            return True
-
-        def update_last_run(self):
+        def record_run(self, *, success, error="", used_kb=None, total_kb=None):
             return None
 
     sent_messages = []
@@ -238,13 +233,8 @@ async def test_live_full_workflow_destructive(monkeypatch, tmp_path):
             self.telegram_chat_id = env["TELEGRAM_CHAT_ID"]
             self.sim24_username = env["SIM24_USERNAME"]
             self.sim24_password = env["SIM24_PASSWORD"]
-            self.last_run_ts = 0
-            self.interval_minutes = 0
 
-        def is_time_to_run(self):
-            return True
-
-        def update_last_run(self):
+        def record_run(self, *, success, error="", used_kb=None, total_kb=None):
             return None
 
     sent_messages = []
