@@ -117,6 +117,12 @@ async def main():
             used_kb=used_kb,
             total_kb=total_kb,
         )
+        if page:
+            try:
+                await page.goto("https://service.sim24.de/public/prelogout", wait_until="load", timeout=15000)
+                print("[LOGOUT] Logged out successfully.")
+            except Exception as exc:
+                print(f"[LOGOUT] Warning: logout request failed: {exc}")
         if browser:
             await browser.close()
         pw = getattr(login_module, "_playwright", None)
