@@ -6,6 +6,8 @@
  *  2. HTTP (fetch)     — Telegram webhook handler:
  *       /book        → triggers workflow_dispatch immediately
  *       /status      → reads and reports current Gist state (interval, last run, captcha)
+ *       /activate    → force monitoring on (overrides auto-skip threshold)
+ *       /pause       → force monitoring off (skips all hourly cron dispatches)
  *       plain text   → if captcha_pending in Gist, saves reply so GitHub Actions picks it up
  *
  * Secrets required (wrangler secret put <NAME>):
@@ -23,12 +25,38 @@ const WORKFLOW      = "check_data.yml";
 const BRANCH        = "main";
 const GIST_FILENAME = "sim24_bot_config.json";
 const BERLIN_TIMEZONE = "Europe/Berlin";
+const MONITORING_SKIP_THRESHOLD_GB = 3.0;
 
 // ── Entry points ──────────────────────────────────────────────────────────────
 
 export default {
-  /** Hourly cron: reliable replacement for GitHub's delayed schedule trigger. */
+  /** Hourly cron: fires workflow_dispatch unless monitoring is paused or data is plentiful. */
   async scheduled(_event, env, _ctx) {
+    const gist = await readGist(env);
+    if (gist.ok) {
+      const monitoringActive = gist.state.monitoring_active ?? null;
+      const { last_used_kb, last_total_kb } = gist.state;
+
+      if (monitoringActive === false) {
+        console.log("[CRON] Skipping — monitoring is paused (/activate to resume).");
+        return;
+      }
+
+      if (monitoringActive !== true && last_used_kb != null && last_total_kb != null) {
+        const remainingGb = (last_total_kb - last_used_kb) / (1024 * 1024);
+        if (remainingGb > MONITORING_SKIP_THRESHOLD_GB) {
+          console.log(
+            `[CRON] Skipping — ${remainingGb.toFixed(2)} GB remaining ` +
+            `(auto mode, threshold: ${MONITORING_SKIP_THRESHOLD_GB} GB). ` +
+            "Send /activate to override.",
+          );
+          return;
+        }
+      }
+    } else {
+      console.warn(`[CRON] Could not read Gist (${gist.error}); proceeding with dispatch.`);
+    }
+
     const ok = await triggerGitHubWorkflow(env);
     if (ok) {
       console.log("[CRON] workflow_dispatch triggered successfully.");
@@ -85,6 +113,10 @@ export default {
       ctx.waitUntil(handleBook(env, chatId));
     } else if (command === "/status" || text === "📊 Status") {
       await handleStatus(env, chatId);
+    } else if (command === "/activate" || text === "▶️ Activate") {
+      ctx.waitUntil(handleActivate(env, chatId));
+    } else if (command === "/pause" || text === "⏸️ Pause") {
+      ctx.waitUntil(handlePause(env, chatId));
     } else if (text && !text.startsWith("/")) {
       // Plain text — could be a captcha reply; check Gist before acting
       ctx.waitUntil(handleCaptchaReply(env, chatId, text));
@@ -105,8 +137,10 @@ async function handleStart(env, chatId) {
     chatId,
     "sim24 bot is online.\n\n" +
       "Available commands:\n" +
-      "/status - read last run, next automatic run, last error, used data, and total data\n" +
-      "/book - trigger the GitHub Actions workflow now",
+      "/status   - last run, next run, error, used data, monitoring mode\n" +
+      "/book     - trigger the GitHub Actions workflow now\n" +
+      "/activate - force monitoring on (overrides auto-skip threshold)\n" +
+      "/pause    - suspend all hourly checks until /activate is sent",
   );
 }
 
@@ -145,6 +179,7 @@ function buildStatusMessage(state) {
   const lastError = formatLastError(state);
   const usedData = formatDataVolume(state.last_used_kb);
   const totalData = formatDataVolume(state.last_total_kb);
+  const monitoring = formatMonitoringStatus(state);
 
   const message =
     `📊 Bot Status\n\n` +
@@ -152,7 +187,8 @@ function buildStatusMessage(state) {
     `⏱️ Next Run In: ${nextRunMinutes} min\n` +
     `❌ Error: ${lastError}\n` +
     `📈 Used Data: ${usedData}\n` +
-    `📦 Total Data: ${totalData}`;
+    `📦 Total Data: ${totalData}\n` +
+    `🔁 Monitoring: ${monitoring}`;
 
   return message;
 }
@@ -202,6 +238,20 @@ function formatLastError(state) {
   return "None";
 }
 
+function formatMonitoringStatus(state) {
+  const ma = state.monitoring_active ?? null;
+  if (ma === true)  return "Forced ON (/pause to stop)";
+  if (ma === false) return "Paused (/activate to resume)";
+  // Auto mode — derive live status from last recorded usage
+  const { last_used_kb, last_total_kb } = state;
+  if (last_used_kb != null && last_total_kb != null) {
+    const remainingGb = (last_total_kb - last_used_kb) / (1024 * 1024);
+    const status = remainingGb <= MONITORING_SKIP_THRESHOLD_GB ? "active" : "idle";
+    return `Auto — ${remainingGb.toFixed(2)} GB remaining (${status})`;
+  }
+  return "Auto";
+}
+
 async function handleCaptchaReply(env, chatId, text) {
   const gist = await readGist(env);
   if (!gist.ok) {
@@ -230,6 +280,44 @@ async function handleCaptchaReply(env, chatId, text) {
       "❌ Failed to save captcha reply to Gist. Check Worker logs.",
     );
   }
+}
+
+async function handleActivate(env, chatId) {
+  const gist = await readGist(env);
+  if (!gist.ok) {
+    await sendTelegram(env, chatId, `❌ Could not read Gist: ${gist.error}`);
+    return;
+  }
+  const state = gist.state;
+  state.monitoring_active = true;
+  const saved = await writeGist(env, state);
+  await sendTelegram(
+    env,
+    chatId,
+    saved
+      ? "▶️ *Monitoring activated.*\nHourly checks will run regardless of remaining data.\nSend /pause to return to auto mode."
+      : "❌ Failed to update Gist. Check Worker logs.",
+    "Markdown",
+  );
+}
+
+async function handlePause(env, chatId) {
+  const gist = await readGist(env);
+  if (!gist.ok) {
+    await sendTelegram(env, chatId, `❌ Could not read Gist: ${gist.error}`);
+    return;
+  }
+  const state = gist.state;
+  state.monitoring_active = false;
+  const saved = await writeGist(env, state);
+  await sendTelegram(
+    env,
+    chatId,
+    saved
+      ? "⏸️ *Monitoring paused.*\nNo hourly checks will run until you send /activate."
+      : "❌ Failed to update Gist. Check Worker logs.",
+    "Markdown",
+  );
 }
 
 // ── GitHub helpers ─────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ class ConfigManager:
         "last_total_kb": None,
         "captcha_pending": False,
         "captcha_reply": "",
+        "monitoring_active": None,  # None=auto, True=forced on, False=forced off
     }
 
     def __init__(self):
@@ -95,6 +96,11 @@ class ConfigManager:
             self._state.pop("captcha_reply", None)
         self._save_state()
 
+    def set_monitoring_active(self, active: "bool | None") -> None:
+        """Set monitoring mode: True=forced on, False=forced off, None=auto (threshold-based)."""
+        self._state["monitoring_active"] = active
+        self._save_state()
+
     def get_captcha_reply(self) -> "str | None":
         """Reload Gist and return the captcha reply written by the scheduler bot."""
         self._state = self._normalize_state(self._load_state())
@@ -134,6 +140,8 @@ class ConfigManager:
 
         normalized["captcha_pending"] = bool(normalized.get("captcha_pending", False))
         normalized["captcha_reply"] = str(normalized.get("captcha_reply", "") or "")
+        ma = normalized.get("monitoring_active")
+        normalized["monitoring_active"] = None if ma is None else bool(ma)
         return normalized
 
     def _load_state(self) -> dict:

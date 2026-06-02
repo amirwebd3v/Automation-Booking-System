@@ -42,11 +42,16 @@ BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 TG_BASE = "https://api.telegram.org/bot{token}/{method}"
 
-BTN_STATUS = "📊 Status"
-BTN_BOOK   = "📦 Book Now"
+BTN_STATUS   = "📊 Status"
+BTN_BOOK     = "📦 Book Now"
+BTN_ACTIVATE = "▶️ Activate"
+BTN_PAUSE    = "⏸️ Pause"
 
 _REPLY_KEYBOARD: dict = {
-    "keyboard": [[{"text": BTN_STATUS}, {"text": BTN_BOOK}]],
+    "keyboard": [
+        [{"text": BTN_STATUS}, {"text": BTN_BOOK}],
+        [{"text": BTN_ACTIVATE}, {"text": BTN_PAUSE}],
+    ],
     "resize_keyboard": True,
     "persistent": True,
     "one_time_keyboard": False,
@@ -219,6 +224,21 @@ class Sim24Bot:
         return f"{kb / (1024 * 1024):.2f} GB"
 
     @staticmethod
+    def _format_monitoring_status(state: dict) -> str:
+        ma = state.get("monitoring_active")
+        if ma is True:
+            return "Forced ON (/pause to stop)"
+        if ma is False:
+            return "Paused (/activate to resume)"
+        used_kb  = state.get("last_used_kb")
+        total_kb = state.get("last_total_kb")
+        if used_kb is not None and total_kb is not None:
+            remaining_gb = (total_kb - used_kb) / (1024 * 1024)
+            status = "active" if remaining_gb <= 3.0 else "idle"
+            return f"Auto \u2014 {remaining_gb:.2f} GB remaining ({status})"
+        return "Auto"
+
+    @staticmethod
     def _format_berlin_timestamp(ts: float) -> str:
         dt = datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone(BERLIN_TZ)
         return f"{dt.strftime('%Y-%m-%d %H:%M %Z')}"
@@ -245,13 +265,15 @@ class Sim24Bot:
         next_run_minutes = cls._minutes_until_next_run(now)
         used_data = cls._format_data_volume(state.get("last_used_kb"))
         total_data = cls._format_data_volume(state.get("last_total_kb"))
+        monitoring = cls._format_monitoring_status(state)
         return (
             "📊 *Bot Status*\n\n"
             f"🕑 *Last Run:* `{last_run}`\n"
             f"⏱️ *Next Run In:* `{next_run_minutes} min`\n"
             f"❌ *Error:* {cls._escape_markdown(error)}\n"
             f"📈 *Used Data:* `{used_data}`\n"
-            f"📦 *Total Data:* `{total_data}`"
+            f"📦 *Total Data:* `{total_data}`\n"
+            f"🔁 *Monitoring:* {monitoring}"
         )
 
     # ── Command / button handlers ─────────────────────────────────────────────
@@ -259,9 +281,11 @@ class Sim24Bot:
     async def _on_start(self) -> None:
         await self._send(
             "👋 *sim24 Auto Booker*\n\n"
-            "Use the buttons below to check status or trigger a booking.\n\n"
-            "• *📊 Status* — shows last run, next automatic run, error, used data, and total data\n"
-            "• *📦 Book Now* — dispatches the GitHub Actions workflow immediately",
+            "Use the buttons below to control the bot.\n\n"
+            "\u2022 *📊 Status* \u2014 last run, next run, error, used data, monitoring mode\n"
+            "\u2022 *📦 Book Now* \u2014 dispatch the GitHub Actions workflow immediately\n"
+            "\u2022 *▶️ Activate* \u2014 force hourly checks on (use when data exceeds 50 GB)\n"
+            "\u2022 *⏸️ Pause* \u2014 suspend all hourly checks (use at month start)",
             reply_markup=_REPLY_KEYBOARD,
         )
 
@@ -282,6 +306,37 @@ class Sim24Bot:
                 "❌ Failed to trigger workflow.\n"
                 "Make sure `GITHUB_GIST_TOKEN` has the `workflow` scope."
             )
+
+    async def _on_activate(self) -> None:
+        state = await self._read_gist()
+        if state is None:
+            await self._send("❌ Could not read Gist. Check configuration.")
+            return
+        state["monitoring_active"] = True
+        saved = await self._write_gist(state)
+        if saved:
+            await self._send(
+                "▶️ *Monitoring activated.*\n"
+                "Hourly checks will run regardless of remaining data.\n"
+                "Send ⏸️ Pause or /pause to return to auto mode."
+            )
+        else:
+            await self._send("❌ Failed to update Gist. Check logs.")
+
+    async def _on_pause(self) -> None:
+        state = await self._read_gist()
+        if state is None:
+            await self._send("❌ Could not read Gist. Check configuration.")
+            return
+        state["monitoring_active"] = False
+        saved = await self._write_gist(state)
+        if saved:
+            await self._send(
+                "⏸️ *Monitoring paused.*\n"
+                "No hourly checks will run until you send ▶️ Activate or /activate."
+            )
+        else:
+            await self._send("❌ Failed to update Gist. Check logs.")
 
     async def _on_captcha_reply(self, text: str) -> None:
         """Save a plain-text captcha reply to Gist when a solve is pending."""
@@ -338,6 +393,10 @@ class Sim24Bot:
                 await self._on_status()
             elif text == BTN_BOOK:
                 await self._on_book()
+            elif text in (BTN_ACTIVATE, "/activate"):
+                await self._on_activate()
+            elif text in (BTN_PAUSE, "/pause"):
+                await self._on_pause()
             elif text and not text.startswith("/"):
                 # Could be a captcha reply; handler checks Gist before acting
                 await self._on_captcha_reply(text)
