@@ -54,3 +54,9 @@ Thumbs.db
 
 # Local repository mirror/artifacts
 repo-mirror.git/
+
+# Wrangler local dev secrets (contains real credentials — NEVER commit)
+cloudflare_trigger/.dev.vars
+
+# Wrangler local dev state/cache (generated at runtime)
+cloudflare_trigger/.wrangler/
