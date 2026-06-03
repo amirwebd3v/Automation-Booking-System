@@ -35,7 +35,8 @@ def test_format_status_never_run():
     )
     assert "Never" in text
     assert "26 min" in text
-    assert "Error:* None" in text
+    assert "Last Run Result" in text
+    assert "Current State" in text
     assert "Used Data" in text
     assert "Total Data" in text
 
@@ -50,7 +51,7 @@ def test_format_status_with_timestamp():
         },
         now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
     )
-    assert "2023-11-14 23:13 CET" in text
+    assert "2023-11-14 23:13" in text
     assert "26 min" in text
     assert "128.28 GB" in text
     assert "130.00 GB" in text
@@ -74,7 +75,7 @@ def test_format_status_includes_monitoring_mode():
         },
         now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
     )
-    assert "Paused" in text
+    assert "Paused - hourly checks are suspended" in text
 
 
 def test_format_monitoring_status_auto_mode_changes_with_remaining_data():
@@ -93,21 +94,21 @@ def test_format_monitoring_status_auto_mode_changes_with_remaining_data():
             "last_total_kb": 50 * 1024 * 1024,
         }
     )
-    assert "active" in active_text
-    assert "idle" in paused_text
+    assert "Auto active" in active_text
+    assert "Auto idle" in paused_text
 
 
 def test_format_status_failed_run_shows_error_and_reason():
     from scheduler_bot.bot import Sim24Bot
     text = Sim24Bot._format_status(
         {
-            "last_run_ts": 0,
+            "last_run_ts": 1_700_000_000.0,
             "last_run_ok": False,
             "last_run_error": "Login failed. Site unavailable.",
         },
         now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
     )
-    assert "Login failed. Site unavailable." in text
+    assert "Failed - Login failed. Site unavailable." in text
 
 
 # ── _on_start ─────────────────────────────────────────────────────────────────
@@ -118,7 +119,9 @@ async def test_on_start_sends_welcome_with_reply_keyboard(bot):
     bot._send = AsyncMock(return_value=1)
     await bot._on_start()
     bot._send.assert_awaited_once()
-    _, kwargs = bot._send.call_args
+    args, kwargs = bot._send.call_args
+    assert "Activate" in args[0]
+    assert "Pause" in args[0]
     assert kwargs["reply_markup"] == _REPLY_KEYBOARD
 
 
@@ -153,9 +156,10 @@ async def test_on_status_sends_error_when_gist_unavailable(bot):
 # ── _on_book ──────────────────────────────────────────────────────────────────
 
 class _FakeDispatchResponse:
-    def __init__(self, status: int, body: str = ""):
+    def __init__(self, status: int, body: str = "", json_payload=None):
         self.status = status
         self._body = body
+        self._json_payload = json_payload or {"ok": True, "result": True}
 
     async def __aenter__(self):
         return self
@@ -165,6 +169,9 @@ class _FakeDispatchResponse:
 
     async def text(self):
         return self._body
+
+    async def json(self):
+        return self._json_payload
 
 
 class _FakeDispatchSession:
@@ -202,6 +209,28 @@ async def test_trigger_workflow_posts_expected_dispatch_request(bot):
     assert request["headers"]["Content-Type"] == "application/json"
     assert request["json"] == {"ref": "main"}
     assert request["timeout"] is not None
+
+
+@pytest.mark.asyncio
+async def test_publish_bot_commands_posts_expected_command_menu(bot):
+    response = _FakeDispatchResponse(status=200, json_payload={"ok": True, "result": True})
+    session = _FakeDispatchSession(response)
+    bot._session = session
+
+    assert await bot._publish_bot_commands() is True
+
+    assert len(session.calls) == 1
+    request = session.calls[0]
+    assert request["url"].endswith("/setMyCommands")
+    assert request["json"] == {
+        "commands": [
+            {"command": "start", "description": "Open the control menu"},
+            {"command": "status", "description": "Show the current monitoring state"},
+            {"command": "book", "description": "Trigger a booking now"},
+            {"command": "activate", "description": "Force monitoring on"},
+            {"command": "pause", "description": "Pause monitoring"},
+        ]
+    }
 
 @pytest.mark.asyncio
 async def test_on_book_sends_success_when_workflow_triggered(bot):
