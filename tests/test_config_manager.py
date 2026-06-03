@@ -163,4 +163,43 @@ def test_record_usage_snapshot_persists_latest_known_data(config_env, monkeypatc
         "last_total_kb": 444,
         "captcha_pending": False,
         "captcha_reply": "",
+        "monitoring_active": None,
     }]
+
+
+def test_monitoring_active_round_trips_through_state(config_env, monkeypatch):
+    saved = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "files": {
+                    ConfigManager.GIST_FILENAME: {
+                        "content": json.dumps({"monitoring_active": None})
+                    }
+                }
+            }
+
+    def fake_get(url, headers, timeout):
+        return FakeResponse()
+
+    def fake_patch(url, headers, json, timeout):
+        saved.append(__import__("json").loads(json["files"][ConfigManager.GIST_FILENAME]["content"]))
+        return FakeResponse()
+
+    monkeypatch.setattr("config_manager.requests.get", fake_get)
+    monkeypatch.setattr("config_manager.requests.patch", fake_patch)
+
+    manager = ConfigManager()
+    assert manager._state["monitoring_active"] is None
+
+    manager.set_monitoring_active(True)
+    manager.set_monitoring_active(False)
+    manager.set_monitoring_active(None)
+
+    assert saved[-1]["monitoring_active"] is None
+    assert saved[0]["monitoring_active"] is True
+    assert saved[1]["monitoring_active"] is False
