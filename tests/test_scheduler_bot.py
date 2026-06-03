@@ -15,6 +15,8 @@ def _bot_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_CHAT_ID",   "999")
     monkeypatch.setenv("GIST_TOKEN",         "gist-tok")
     monkeypatch.setenv("GIST_ID",            "gist-id")
+    monkeypatch.setenv("GITHUB_GIST_TOKEN",   "gist-tok")
+    monkeypatch.setenv("GITHUB_GIST_ID",      "gist-id")
 
 
 @pytest.fixture()
@@ -61,6 +63,38 @@ def test_format_status_without_saved_data_explains_missing_snapshot():
         now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
     )
     assert "Not yet recorded" in text
+
+
+def test_format_status_includes_monitoring_mode():
+    from scheduler_bot.bot import Sim24Bot
+    text = Sim24Bot._format_status(
+        {
+            "last_run_ts": 0,
+            "monitoring_active": False,
+        },
+        now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
+    )
+    assert "Paused" in text
+
+
+def test_format_monitoring_status_auto_mode_changes_with_remaining_data():
+    from scheduler_bot.bot import Sim24Bot
+    active_text = Sim24Bot._format_monitoring_status(
+        {
+            "monitoring_active": None,
+            "last_used_kb": 49 * 1024 * 1024,
+            "last_total_kb": 50 * 1024 * 1024,
+        }
+    )
+    paused_text = Sim24Bot._format_monitoring_status(
+        {
+            "monitoring_active": None,
+            "last_used_kb": 40 * 1024 * 1024,
+            "last_total_kb": 50 * 1024 * 1024,
+        }
+    )
+    assert "active" in active_text
+    assert "idle" in paused_text
 
 
 def test_format_status_failed_run_shows_error_and_reason():
@@ -190,6 +224,34 @@ async def test_on_book_sends_failure_when_dispatch_fails(bot):
 
     messages = [call[0][0] for call in bot._send.call_args_list]
     assert any("❌" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_on_activate_sets_monitoring_active_and_confirms(bot):
+    state = {"monitoring_active": None}
+    bot._read_gist = AsyncMock(return_value=state)
+    bot._write_gist = AsyncMock(return_value=True)
+    bot._send = AsyncMock(return_value=6)
+
+    await bot._on_activate()
+
+    written_state = bot._write_gist.call_args[0][0]
+    assert written_state["monitoring_active"] is True
+    assert "activated" in bot._send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_on_pause_sets_monitoring_active_false_and_confirms(bot):
+    state = {"monitoring_active": None}
+    bot._read_gist = AsyncMock(return_value=state)
+    bot._write_gist = AsyncMock(return_value=True)
+    bot._send = AsyncMock(return_value=7)
+
+    await bot._on_pause()
+
+    written_state = bot._write_gist.call_args[0][0]
+    assert written_state["monitoring_active"] is False
+    assert "paused" in bot._send.call_args[0][0].lower()
 
 
 # ── _on_captcha_reply ─────────────────────────────────────────────────────────

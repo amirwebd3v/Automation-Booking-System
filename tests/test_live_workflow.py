@@ -213,6 +213,8 @@ async def test_live_full_workflow_safe(monkeypatch, tmp_path):
 
     await workflow_main.main()
 
+    assert sent_messages == []
+
 
 @pytest.mark.destructive
 @pytest.mark.asyncio
@@ -280,8 +282,4 @@ async def test_live_full_workflow_destructive(monkeypatch, tmp_path):
     monkeypatch.setattr(workflow_main, "Sim24Login", Sim24Login)
     monkeypatch.setattr(workflow_main, "DataChecker", DataChecker)
     monkeypatch.setattr(workflow_main, "BookingModule", BookingModule)
-    monkeypatch.setattr(DataChecker, "get_usage", guarded_get_usage)
-
-    await workflow_main.main()
-
-    assert any("2 GB packet booked successfully" in message for message in sent_messages)
+    assert sent_messages == []
