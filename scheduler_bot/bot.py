@@ -4,12 +4,10 @@ scheduler_bot/bot.py — Always-on Telegram control bot for sim24 Auto Booker.
 Runs as a long-poll process alongside the GitHub Actions pipeline.
 
 Keyboard UX:
-  Reply keyboard (persistent bar): [📊 Status]  [📦 Book Now]
+    Reply keyboard (persistent bar): [📊 Status]  [📦 Book Now]
 
-        [▶️ Activate] [⏸️ Pause]
-
-        📊 Status  → shows last run, last result, current state, used data, total data
-               + inline buttons [🔄 Refresh] [📦 Book Now]
+                📊 Status  → shows last run, last result, current state, used data, total data
+                             + inline buttons [🔄 Refresh] [📦 Book Now] [▶️ Activate] [⏸️ Pause]
 
   📦 Book Now → dispatches the GitHub Actions check_data.yml workflow
 
@@ -61,7 +59,6 @@ BTN_PAUSE    = "⏸️ Pause"
 _REPLY_KEYBOARD: dict = {
     "keyboard": [
         [{"text": BTN_STATUS}, {"text": BTN_BOOK}],
-        [{"text": BTN_ACTIVATE}, {"text": BTN_PAUSE}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -72,6 +69,8 @@ _STATUS_INLINE: dict = {
     "inline_keyboard": [[
         {"text": "🔄 Refresh",   "callback_data": "refresh"},
         {"text": "📦 Book Now",  "callback_data": "book"},
+        {"text": BTN_ACTIVATE,   "callback_data": "activate"},
+        {"text": BTN_PAUSE,      "callback_data": "pause"},
     ]]
 }
 
@@ -246,23 +245,17 @@ class Sim24Bot:
     def _format_monitoring_status(state: dict) -> str:
         ma = state.get("monitoring_active")
         if ma is True:
-            return "Forced ON - hourly checks are running"
+            return "activated"
         if ma is False:
-            return "Paused - hourly checks are suspended"
+            return "paused"
         used_kb  = state.get("last_used_kb")
         total_kb = state.get("last_total_kb")
         if used_kb is not None and total_kb is not None:
             remaining_gb = (total_kb - used_kb) / (1024 * 1024)
             if remaining_gb <= MONITORING_SKIP_THRESHOLD_GB:
-                return (
-                    f"Auto active - {remaining_gb:.2f} GB remaining "
-                    "(hourly checks are running)"
-                )
-            return (
-                f"Auto idle - {remaining_gb:.2f} GB remaining "
-                f"(checks suspended until remaining data falls to {MONITORING_SKIP_THRESHOLD_GB:.1f} GB)"
-            )
-        return "Auto - usage snapshot unavailable"
+                return "activated"
+            return "paused"
+        return "undefined"
 
     @staticmethod
     def _format_berlin_timestamp(ts: float) -> str:
@@ -298,11 +291,12 @@ class Sim24Bot:
         total_data = cls._format_data_volume(state.get("last_total_kb"))
         monitoring = cls._format_monitoring_status(state)
         last_run_result = cls._format_last_run_result(state)
+        next_run_text = "undefined" if monitoring == "paused" else f"{next_run_minutes} min"
         return (
             "📊 *Bot Status*\n\n"
             f"🕑 *Last Run:* `{last_run}`\n"
             f"📋 *Last Run Result:* {cls._escape_markdown(last_run_result)}\n"
-            f"⏱️ *Next Run In:* `{next_run_minutes} min`\n"
+            f"⏱️ *Next Run In:* `{next_run_text}`\n"
             f"📈 *Used Data:* `{used_data}`\n"
             f"📦 *Total Data:* `{total_data}`\n"
             f"🧭 *Current State:* {monitoring}"
@@ -316,8 +310,7 @@ class Sim24Bot:
             "Use the buttons below to control the bot.\n\n"
             "\u2022 *📊 Status* \u2014 last run, next run, error, used data, monitoring mode\n"
             "\u2022 *📦 Book Now* \u2014 dispatch the GitHub Actions workflow immediately\n"
-            "\u2022 *▶️ Activate* \u2014 force hourly checks on (use when data exceeds 50 GB)\n"
-            "\u2022 *⏸️ Pause* \u2014 suspend all hourly checks (use at month start)",
+            "Tap *📊 Status* to get the inline controls for *▶️ Activate* and *⏸️ Pause*.",
             reply_markup=_REPLY_KEYBOARD,
         )
 
@@ -409,6 +402,12 @@ class Sim24Bot:
                 else "❌ Failed to trigger workflow. Check `GITHUB_GIST_TOKEN` scope."
             )
             await self._send(text)
+        elif data == "activate":
+            await self._answer_cb(cq_id, "Activating…")
+            await self._on_activate()
+        elif data == "pause":
+            await self._answer_cb(cq_id, "Pausing…")
+            await self._on_pause()
 
     # ── Update dispatcher ─────────────────────────────────────────────────────
 
