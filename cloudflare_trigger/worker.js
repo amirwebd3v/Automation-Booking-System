@@ -176,7 +176,7 @@ function buildStatusMessage(state) {
   }
 
   const nextRunMinutes = minutesUntilNextRun();
-  const lastError = formatLastError(state);
+  const lastRunResult = formatLastRunResult(state);
   const usedData = formatDataVolume(state.last_used_kb);
   const totalData = formatDataVolume(state.last_total_kb);
   const monitoring = formatMonitoringStatus(state);
@@ -184,11 +184,11 @@ function buildStatusMessage(state) {
   const message =
     `📊 Bot Status\n\n` +
     `🕑 Last Run: ${lastRunText}\n` +
+    `📋 Last Run Result: ${lastRunResult}\n` +
     `⏱️ Next Run In: ${nextRunMinutes} min\n` +
-    `❌ Error: ${lastError}\n` +
     `📈 Used Data: ${usedData}\n` +
     `📦 Total Data: ${totalData}\n` +
-    `🔁 Monitoring: ${monitoring}`;
+    `🧭 Current State: ${monitoring}`;
 
   return message;
 }
@@ -219,7 +219,6 @@ function formatBerlinTimestamp(tsSeconds) {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-    timeZoneName: "short",
   });
   const parts = Object.fromEntries(
     formatter
@@ -228,28 +227,39 @@ function formatBerlinTimestamp(tsSeconds) {
       .map((part) => [part.type, part.value]),
   );
 
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} ${parts.timeZoneName} (${BERLIN_TIMEZONE})`;
-}
-
-function formatLastError(state) {
-  if (state.last_run_ok === false) {
-    return state.last_run_error || "Last run did not complete successfully.";
-  }
-  return "None";
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }
 
 function formatMonitoringStatus(state) {
   const ma = state.monitoring_active ?? null;
-  if (ma === true)  return "Forced ON (/pause to stop)";
-  if (ma === false) return "Paused (/activate to resume)";
-  // Auto mode — derive live status from last recorded usage
+  if (ma === true) {
+    return "Forced ON - hourly checks are running";
+  }
+  if (ma === false) {
+    return "Paused - hourly checks are suspended";
+  }
   const { last_used_kb, last_total_kb } = state;
   if (last_used_kb != null && last_total_kb != null) {
     const remainingGb = (last_total_kb - last_used_kb) / (1024 * 1024);
-    const status = remainingGb <= MONITORING_SKIP_THRESHOLD_GB ? "active" : "idle";
-    return `Auto — ${remainingGb.toFixed(2)} GB remaining (${status})`;
+    if (remainingGb <= MONITORING_SKIP_THRESHOLD_GB) {
+      return `Auto active - ${remainingGb.toFixed(2)} GB remaining (hourly checks are running)`;
+    }
+    return (
+      `Auto idle - ${remainingGb.toFixed(2)} GB remaining ` +
+      `(checks suspended until remaining data falls to ${MONITORING_SKIP_THRESHOLD_GB.toFixed(1)} GB)`
+    );
   }
-  return "Auto";
+  return "Auto - usage snapshot unavailable";
+}
+
+function formatLastRunResult(state) {
+  if (!state.last_run_ts || state.last_run_ts <= 0) {
+    return "Not yet run";
+  }
+  if (state.last_run_ok === false) {
+    return `Failed - ${state.last_run_error || "Last run failed."}`;
+  }
+  return "Succeeded";
 }
 
 async function handleCaptchaReply(env, chatId, text) {

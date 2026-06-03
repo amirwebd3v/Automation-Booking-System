@@ -6,7 +6,9 @@ Runs as a long-poll process alongside the GitHub Actions pipeline.
 Keyboard UX:
   Reply keyboard (persistent bar): [📊 Status]  [📦 Book Now]
 
-    📊 Status  → shows last run, next automatic run, last error, used data, total data
+        [▶️ Activate] [⏸️ Pause]
+
+        📊 Status  → shows last run, last result, current state, used data, total data
                + inline buttons [🔄 Refresh] [📦 Book Now]
 
   📦 Book Now → dispatches the GitHub Actions check_data.yml workflow
@@ -39,8 +41,17 @@ WORKFLOW      = "check_data.yml"
 BRANCH        = "main"
 GIST_FILENAME = "sim24_bot_config.json"
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
+MONITORING_SKIP_THRESHOLD_GB = 3.0
 
 TG_BASE = "https://api.telegram.org/bot{token}/{method}"
+
+BOT_COMMANDS = [
+    {"command": "start", "description": "Open the control menu"},
+    {"command": "status", "description": "Show the current monitoring state"},
+    {"command": "book", "description": "Trigger a booking now"},
+    {"command": "activate", "description": "Force monitoring on"},
+    {"command": "pause", "description": "Pause monitoring"},
+]
 
 BTN_STATUS   = "📊 Status"
 BTN_BOOK     = "📦 Book Now"
@@ -53,7 +64,7 @@ _REPLY_KEYBOARD: dict = {
         [{"text": BTN_ACTIVATE}, {"text": BTN_PAUSE}],
     ],
     "resize_keyboard": True,
-    "persistent": True,
+    "is_persistent": True,
     "one_time_keyboard": False,
 }
 
@@ -138,6 +149,14 @@ class Sim24Bot:
             "callback_query_id": callback_id,
             "text":              text,
         })
+
+    async def _publish_bot_commands(self) -> bool:
+        """Publish the slash-command menu so the new controls show up in Telegram."""
+        result = await self._tg_post("setMyCommands", {"commands": BOT_COMMANDS})
+        if not result.get("ok"):
+            print(f"[BOT] setMyCommands failed: {result.get('description', 'unknown error')}")
+            return False
+        return True
 
     # ── Gist helpers ──────────────────────────────────────────────────────────
 
@@ -227,21 +246,37 @@ class Sim24Bot:
     def _format_monitoring_status(state: dict) -> str:
         ma = state.get("monitoring_active")
         if ma is True:
-            return "Forced ON (/pause to stop)"
+            return "Forced ON - hourly checks are running"
         if ma is False:
-            return "Paused (/activate to resume)"
+            return "Paused - hourly checks are suspended"
         used_kb  = state.get("last_used_kb")
         total_kb = state.get("last_total_kb")
         if used_kb is not None and total_kb is not None:
             remaining_gb = (total_kb - used_kb) / (1024 * 1024)
-            status = "active" if remaining_gb <= 3.0 else "idle"
-            return f"Auto \u2014 {remaining_gb:.2f} GB remaining ({status})"
-        return "Auto"
+            if remaining_gb <= MONITORING_SKIP_THRESHOLD_GB:
+                return (
+                    f"Auto active - {remaining_gb:.2f} GB remaining "
+                    "(hourly checks are running)"
+                )
+            return (
+                f"Auto idle - {remaining_gb:.2f} GB remaining "
+                f"(checks suspended until remaining data falls to {MONITORING_SKIP_THRESHOLD_GB:.1f} GB)"
+            )
+        return "Auto - usage snapshot unavailable"
 
     @staticmethod
     def _format_berlin_timestamp(ts: float) -> str:
         dt = datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone(BERLIN_TZ)
-        return f"{dt.strftime('%Y-%m-%d %H:%M %Z')}"
+        return f"{dt.strftime('%Y-%m-%d %H:%M')}"
+
+    @staticmethod
+    def _format_last_run_result(state: dict) -> str:
+        if not state.get("last_run_ts"):
+            return "Not yet run"
+        if state.get("last_run_ok") is False:
+            error = state.get("last_run_error") or "Last run failed."
+            return f"Failed - {error}"
+        return "Succeeded"
 
     @staticmethod
     def _escape_markdown(text: str) -> str:
@@ -258,22 +293,19 @@ class Sim24Bot:
         else:
             last_run = "Never"
 
-        error = "None"
-        if state.get("last_run_ok") is False:
-            error = state.get("last_run_error") or "Last run did not complete successfully."
-
         next_run_minutes = cls._minutes_until_next_run(now)
         used_data = cls._format_data_volume(state.get("last_used_kb"))
         total_data = cls._format_data_volume(state.get("last_total_kb"))
         monitoring = cls._format_monitoring_status(state)
+        last_run_result = cls._format_last_run_result(state)
         return (
             "📊 *Bot Status*\n\n"
             f"🕑 *Last Run:* `{last_run}`\n"
+            f"📋 *Last Run Result:* {cls._escape_markdown(last_run_result)}\n"
             f"⏱️ *Next Run In:* `{next_run_minutes} min`\n"
-            f"❌ *Error:* {cls._escape_markdown(error)}\n"
             f"📈 *Used Data:* `{used_data}`\n"
             f"📦 *Total Data:* `{total_data}`\n"
-            f"🔁 *Monitoring:* {monitoring}"
+            f"🧭 *Current State:* {monitoring}"
         )
 
     # ── Command / button handlers ─────────────────────────────────────────────
@@ -459,6 +491,7 @@ class Sim24Bot:
             # Clear any active webhook so long-polling receives updates
             await self._tg_post("deleteWebhook", {"drop_pending_updates": False})
             print("[BOT] Webhook cleared (if any).")
+            await self._publish_bot_commands()
             await self.run()
         finally:
             await self._session.close()
