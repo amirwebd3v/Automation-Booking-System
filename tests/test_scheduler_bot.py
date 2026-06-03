@@ -75,7 +75,8 @@ def test_format_status_includes_monitoring_mode():
         },
         now=datetime(2024, 1, 1, 12, 34, tzinfo=timezone.utc),
     )
-    assert "Paused - hourly checks are suspended" in text
+    assert "⏱️ *Next Run In:* `undefined`" in text
+    assert "🧭 *Current State:* paused" in text
 
 
 def test_format_monitoring_status_auto_mode_changes_with_remaining_data():
@@ -94,8 +95,8 @@ def test_format_monitoring_status_auto_mode_changes_with_remaining_data():
             "last_total_kb": 50 * 1024 * 1024,
         }
     )
-    assert "Auto active" in active_text
-    assert "Auto idle" in paused_text
+    assert active_text == "activated"
+    assert paused_text == "paused"
 
 
 def test_format_status_failed_run_shows_error_and_reason():
@@ -120,8 +121,7 @@ async def test_on_start_sends_welcome_with_reply_keyboard(bot):
     await bot._on_start()
     bot._send.assert_awaited_once()
     args, kwargs = bot._send.call_args
-    assert "Activate" in args[0]
-    assert "Pause" in args[0]
+    assert "inline controls" in args[0]
     assert kwargs["reply_markup"] == _REPLY_KEYBOARD
 
 
@@ -139,6 +139,8 @@ async def test_on_status_sends_gist_data_with_inline_keyboard(bot):
     bot._send.assert_awaited_once()
     text, kwargs = bot._send.call_args[0][0], bot._send.call_args[1]
     assert "Never" in text
+    assert "▶️ Activate" in str(kwargs["reply_markup"])
+    assert "⏸️ Pause" in str(kwargs["reply_markup"])
     assert kwargs["reply_markup"] == _STATUS_INLINE
 
 
