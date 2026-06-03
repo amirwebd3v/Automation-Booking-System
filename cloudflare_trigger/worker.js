@@ -87,6 +87,53 @@ export default {
       return new Response("Bad Request", { status: 400 });
     }
 
+    if (update.callback_query) {
+      const cq = update.callback_query;
+      const chatId = cq.message?.chat?.id;
+      if (String(chatId) !== String(env.TELEGRAM_CHAT_ID)) {
+        return new Response("OK");
+      }
+
+      const data = cq.data || "";
+      if (data === "refresh") {
+        const gist = await readGist(env);
+        if (gist.ok) {
+          await answerCallbackQuery(env, cq.id, "Refreshing…");
+          await editTelegramMessage(env, chatId, cq.message.message_id, buildStatusMessage(gist.state), "Markdown", {
+            inline_keyboard: [[
+              { text: "🔄 Refresh", callback_data: "refresh" },
+              { text: "📦 Book Now", callback_data: "book" },
+              { text: "▶️ Activate", callback_data: "activate" },
+              { text: "⏸️ Pause", callback_data: "pause" },
+            ]],
+          });
+        } else {
+          await answerCallbackQuery(env, cq.id, "Could not read status.");
+        }
+        return new Response("OK");
+      }
+
+      if (data === "activate") {
+        await answerCallbackQuery(env, cq.id, "Activating…");
+        await handleActivate(env, chatId);
+        return new Response("OK");
+      }
+
+      if (data === "pause") {
+        await answerCallbackQuery(env, cq.id, "Pausing…");
+        await handlePause(env, chatId);
+        return new Response("OK");
+      }
+
+      if (data === "book") {
+        await answerCallbackQuery(env, cq.id, "Triggering…");
+        ctx.waitUntil(handleBook(env, chatId));
+        return new Response("OK");
+      }
+
+      return new Response("OK");
+    }
+
     const msg = update.message;
     if (!msg) return new Response("OK"); // ignore non-message updates (edits, etc.)
 
@@ -140,7 +187,7 @@ async function handleStart(env, chatId) {
       "/status   - last run, next run, error, used data, monitoring mode\n" +
       "/book     - trigger the GitHub Actions workflow now\n" +
       "/activate - force monitoring on (overrides auto-skip threshold)\n" +
-      "/pause    - suspend all hourly checks until /activate is sent",
+      "/pause    - suspend all hourly checks",
   );
 }
 
@@ -166,7 +213,14 @@ async function handleStatus(env, chatId) {
   }
 
   console.log(`[STATUS] Gist read succeeded for chat ${chatId}`);
-  await sendTelegram(env, chatId, buildStatusMessage(gist.state));
+  await sendTelegram(env, chatId, buildStatusMessage(gist.state), "Markdown", {
+    inline_keyboard: [[
+      { text: "🔄 Refresh", callback_data: "refresh" },
+      { text: "📦 Book Now", callback_data: "book" },
+      { text: "▶️ Activate", callback_data: "activate" },
+      { text: "⏸️ Pause", callback_data: "pause" },
+    ]],
+  });
 }
 
 function buildStatusMessage(state) {
@@ -175,17 +229,17 @@ function buildStatusMessage(state) {
     lastRunText = formatBerlinTimestamp(state.last_run_ts);
   }
 
-  const nextRunMinutes = minutesUntilNextRun();
   const lastRunResult = formatLastRunResult(state);
   const usedData = formatDataVolume(state.last_used_kb);
   const totalData = formatDataVolume(state.last_total_kb);
   const monitoring = formatMonitoringStatus(state);
+  const nextRunText = monitoring === "paused" ? "undefined" : `${minutesUntilNextRun()} min`;
 
   const message =
     `📊 Bot Status\n\n` +
     `🕑 Last Run: ${lastRunText}\n` +
     `📋 Last Run Result: ${lastRunResult}\n` +
-    `⏱️ Next Run In: ${nextRunMinutes} min\n` +
+    `⏱️ Next Run In: ${nextRunText}\n` +
     `📈 Used Data: ${usedData}\n` +
     `📦 Total Data: ${totalData}\n` +
     `🧭 Current State: ${monitoring}`;
@@ -233,23 +287,20 @@ function formatBerlinTimestamp(tsSeconds) {
 function formatMonitoringStatus(state) {
   const ma = state.monitoring_active ?? null;
   if (ma === true) {
-    return "Forced ON - hourly checks are running";
+    return "activated";
   }
   if (ma === false) {
-    return "Paused - hourly checks are suspended";
+    return "paused";
   }
   const { last_used_kb, last_total_kb } = state;
   if (last_used_kb != null && last_total_kb != null) {
     const remainingGb = (last_total_kb - last_used_kb) / (1024 * 1024);
     if (remainingGb <= MONITORING_SKIP_THRESHOLD_GB) {
-      return `Auto active - ${remainingGb.toFixed(2)} GB remaining (hourly checks are running)`;
+      return "activated";
     }
-    return (
-      `Auto idle - ${remainingGb.toFixed(2)} GB remaining ` +
-      `(checks suspended until remaining data falls to ${MONITORING_SKIP_THRESHOLD_GB.toFixed(1)} GB)`
-    );
+    return "paused";
   }
-  return "Auto - usage snapshot unavailable";
+  return "undefined";
 }
 
 function formatLastRunResult(state) {
@@ -458,11 +509,14 @@ async function writeGist(env, state) {
 
 // ── Telegram helper ────────────────────────────────────────────────────────────
 
-async function sendTelegram(env, chatId, text, parseMode = null) {
+async function sendTelegram(env, chatId, text, parseMode = null, replyMarkup = null) {
   try {
     const payload = { chat_id: chatId, text };
     if (parseMode) {
       payload.parse_mode = parseMode;
+    }
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
     }
 
     const resp = await fetch(
@@ -482,6 +536,64 @@ async function sendTelegram(env, chatId, text, parseMode = null) {
     return true;
   } catch (e) {
     console.error(`[ERROR] Telegram sendMessage exception: ${e}`);
+    return false;
+  }
+}
+
+async function editTelegramMessage(env, chatId, messageId, text, parseMode = null, replyMarkup = null) {
+  try {
+    const payload = { chat_id: chatId, message_id: messageId, text };
+    if (parseMode) {
+      payload.parse_mode = parseMode;
+    }
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
+    }
+
+    const resp = await fetch(
+      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!resp.ok) {
+      const body = await resp.text();
+      console.error(`[ERROR] Telegram editMessageText failed: HTTP ${resp.status} — ${body}`);
+      return false;
+    }
+    console.log(`[TG] editMessageText ok chat=${chatId} message=${messageId}`);
+    return true;
+  } catch (e) {
+    console.error(`[ERROR] Telegram editMessageText exception: ${e}`);
+    return false;
+  }
+}
+
+async function answerCallbackQuery(env, callbackQueryId, text = "") {
+  try {
+    const payload = { callback_query_id: callbackQueryId };
+    if (text) {
+      payload.text = text;
+    }
+
+    const resp = await fetch(
+      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+    if (!resp.ok) {
+      const body = await resp.text();
+      console.error(`[ERROR] Telegram answerCallbackQuery failed: HTTP ${resp.status} — ${body}`);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.error(`[ERROR] Telegram answerCallbackQuery exception: ${e}`);
     return false;
   }
 }
