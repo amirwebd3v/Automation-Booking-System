@@ -26,24 +26,24 @@ class DataChecker:
         Values are in kilobytes.
         """
         # ── Method A: ARIA attributes (most reliable) ─────────────────────
-        try:
-            progressbar = await self.page.query_selector(
-                ".e-data_usage_meter-data_total[role='progressbar']"
-            )
-            if progressbar:
-                used_kb  = await progressbar.get_attribute("aria-valuenow")
-                total_kb = await progressbar.get_attribute("aria-valuemax")
+        # try:
+        #     progressbar = await self.page.query_selector(
+        #         ".e-data_usage_meter-data_total[role='status']"
+        #     )
+        #     if progressbar:
+        #         used_kb  = await progressbar.get_attribute("aria-valuenow")
+        #         total_kb = await progressbar.get_attribute("aria-valuemax")
 
-                if used_kb and total_kb:
-                    print(f"[DATA] ARIA method — used: {used_kb} KB, total: {total_kb} KB")
-                    return int(float(used_kb)), int(float(total_kb))
-        except Exception as e:
-            print(f"[DATA] ARIA method failed: {e}")
+        #         if used_kb and total_kb:
+        #             print(f"[DATA] ARIA method — used: {used_kb} KB, total: {total_kb} KB")
+        #             return int(float(used_kb)), int(float(total_kb))
+        # except Exception as e:
+        #     print(f"[DATA] ARIA method failed: {e}")
 
         # ── Method B: Text span parsing (fallback) ─────────────────────────
         try:
-            used_text  = await self.page.inner_text(".font-weight-bold.pr-1")
-            total_text = await self.page.inner_text(".l-txt-small.pr-2")
+            used_text  = await self.page.inner_text(".l-h4.font-weight-bold")
+            total_text = await self.page.inner_text(".font-weight-bold.l-txt-small.pr-2")
 
             used_gb  = self._parse_german_gb(used_text)
             total_gb = self._parse_german_gb(total_text)

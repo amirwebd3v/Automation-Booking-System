@@ -50,8 +50,8 @@ async def test_get_usage_falls_back_to_visible_text():
     page = FakePage(
         progressbar=FakeProgressBar(None, None),
         texts={
-            ".font-weight-bold.pr-1": "98,30 GB",
-            ".l-txt-small.pr-2": "von 100,00 GB",
+            ".l-h4.font-weight-bold": "98,30 GB",
+            ".font-weight-bold.l-txt-small.pr-2": "von 100,00 GB",
         },
     )
 
