@@ -149,19 +149,25 @@ class Sim24Login:
                         state_saved = True
                         break
 
-                    if "login" in current_url.lower():
-                        error_text = await self._get_login_error(page)
-                        if error_text:
-                            print(f"[LOGIN] Login error on page: {error_text}")
+                    # Any URL other than SUCCESS_URL means the login did not go
+                    # through -- this used to only be checked for URLs containing
+                    # "login", so a submit that silently no-opped and left us on
+                    # e.g. ".../#" matched neither branch and fell through the
+                    # loop as if nothing had happened, proceeding to the data
+                    # page while never actually authenticated.
+                    print(f"[LOGIN] Not logged in. Current URL: {current_url}")
+                    error_text = await self._get_login_error(page)
+                    if error_text:
+                        print(f"[LOGIN] Login error on page: {error_text}")
 
-                        if attempt < MAX_LOGIN_ATTEMPTS:
-                            print(f"[LOGIN] Retrying... ({attempt}/{MAX_LOGIN_ATTEMPTS})")
-                            await asyncio.sleep(2)
-                            continue
+                    if attempt < MAX_LOGIN_ATTEMPTS:
+                        print(f"[LOGIN] Retrying... ({attempt}/{MAX_LOGIN_ATTEMPTS})")
+                        await asyncio.sleep(2)
+                        continue
 
-                        print("[LOGIN] All attempts failed.")
-                        await browser.close()
-                        return None, None
+                    print("[LOGIN] All attempts failed.")
+                    await browser.close()
+                    return None, None
 
                 except Exception as e:
                     print(f"[LOGIN] Exception on attempt {attempt}: {e}")
