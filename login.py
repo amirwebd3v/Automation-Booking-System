@@ -173,15 +173,21 @@ class Sim24Login:
         try:
             print("[LOGIN] Navigating to data usage page...")
             await page.goto(DATA_URL, wait_until="domcontentloaded", timeout=30_000)
-            await page.wait_for_selector(".e-data_usage_meter", timeout=10_000)
-            print("[LOGIN] Data usage page loaded successfully.")
+            # Don't hard-gate on one specific widget class here — its markup has
+            # changed before (e.g. the ARIA role rename DataChecker works around)
+            # and DataChecker already does its own robust primary/fallback read.
+            try:
+                await page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
+            print("[LOGIN] Data usage page loaded.")
             if not session_reused and not state_saved:
                 await context.storage_state(path=str(STORAGE_STATE_PATH))
                 print(f"[LOGIN] Saved session state to {STORAGE_STATE_PATH}")
             return browser, page
 
         except Exception as e:
-            print(f"[LOGIN] Failed to load data usage page: {e}")
+            print(f"[LOGIN] Failed to navigate to data usage page: {e}")
             await browser.close()
             return None, None
 
@@ -281,9 +287,10 @@ class Sim24Login:
         for selector in error_selectors:
             try:
                 el = await page.query_selector(selector)
-                if el:
+                if el and await el.is_visible():
                     text = await el.inner_text()
-                    return text.strip()
+                    if text.strip():
+                        return text.strip()
             except Exception:
                 continue
         return None
