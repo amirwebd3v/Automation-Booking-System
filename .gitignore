@@ -14,6 +14,13 @@ ENV/
 .env.*
 !.env.example
 
+# Playwright session/auth state and other local credential dumps
+storage_state.json
+*.session
+credentials.json
+*.pem
+*.key
+
 # Python tooling caches and test artifacts
 .pytest_cache/
 .mypy_cache/
