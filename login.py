@@ -6,14 +6,8 @@ from pathlib import Path
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from typing import Tuple, Optional
 
-try:
-    from playwright_stealth import stealth_async
-except Exception:
-    async def stealth_async(page: Page) -> None:
-        return None
-
 LOGIN_URL   = "https://service.sim24.de/"
-SUCCESS_URL = "https://service.sim24.de/mytariff"
+SUCCESS_URL = "https://service.sim24.de/start"
 DATA_URL    = "https://service.sim24.de/mytariff/invoice/showGprsDataUsage"
 LOGIN_FORM_SELECTOR = "#UserLoginType_alias"
 DASHBOARD_READY_SELECTORS = [
@@ -212,9 +206,12 @@ class Sim24Login:
         return await browser.new_context(**context_options)
 
     async def _new_stealth_page(self, context: BrowserContext) -> Page:
-        page = await context.new_page()
-        await stealth_async(page)
-        return page
+        # NOTE: playwright-stealth used to be applied here, but its injected
+        # script conflicts with sim24's jQuery Validate plugin -- it throws
+        # "$(...).validate is not a function" inside the site's own submit
+        # handler, which silently aborts every login attempt with no visible
+        # error. Confirmed live: removing it is what makes login work at all.
+        return await context.new_page()
 
     async def _load_existing_session(self, page: Page) -> bool:
         print(f"[LOGIN] Trying stored session via {SUCCESS_URL}")
